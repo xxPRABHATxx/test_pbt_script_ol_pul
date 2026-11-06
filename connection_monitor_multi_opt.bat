@@ -26,10 +26,12 @@ echo 2. VALORANT (playvalorant.com)
 echo 3. VALORANT AP shared service (shared.ap.a.pvp.net)
 echo 4. VALORANT AP player data (pd.ap.a.pvp.net)
 echo 5. VALORANT AP game lobby (glz-ap-1.ap.a.pvp.net)
+echo 0. Quit
 echo.
 set "ENDPOINT_CHOICE="
 set /p "ENDPOINT_CHOICE=Choose endpoint (ENTER = Google): "
 if not defined ENDPOINT_CHOICE set "ENDPOINT_CHOICE=1"
+if "%ENDPOINT_CHOICE%"=="0" exit /b
 if "%ENDPOINT_CHOICE%"=="1" set "VERIFY_HOST=google.com"
 if "%ENDPOINT_CHOICE%"=="2" set "VERIFY_HOST=playvalorant.com"
 if "%ENDPOINT_CHOICE%"=="3" set "VERIFY_HOST=shared.ap.a.pvp.net"
@@ -46,7 +48,7 @@ echo ============================================================
 echo  Connection monitor - checks every 3 seconds
 echo  Re-detects the DNS server your PC is using on every check,
 echo  verifies %VERIFY_HOST% through the active DNS server.
-echo  Press Ctrl+C to stop.   To try the voice: connection_monitor.bat test
+echo  Press 0 anytime to return to endpoint selection.  Ctrl+C to exit.
 echo ============================================================
 echo.
 
@@ -74,10 +76,9 @@ rem Report a DNS change; the new server is used for this check
 if defined KNOWN if not "%KNOWN%"=="%DNS%" (set "ENTRY=[%now:~0,8%] DNS server changed: %KNOWN% to %DNS%" & call :log "%ENTRY%")
 set "KNOWN=%DNS%"
 
-rem Verify that this DNS server can actually resolve a domain name.
-rem This does not rely on the DNS server responding to ping.
-powershell -NoProfile -Command "try { Resolve-DnsName -Name $env:VERIFY_HOST -Server $env:DNS -DnsOnly -Quick -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
-if errorlevel 1 (
+rem Verify DNS in the background so key 0 remains available during the lookup.
+call :checkdns
+if "%DNS_RESULT%"=="FAIL" (
     set "ENTRY=[%now:~0,8%] DNS FAILURE - %DNS% could not resolve %VERIFY_HOST%"
     call :log "%ENTRY%"
     call :beep
@@ -87,10 +88,30 @@ if errorlevel 1 (
 )
 
 :wait
-timeout /t 3 /nobreak >nul
+set "WAIT_TICKS=0"
+:wait_tick
+choice /c 0X /n /t 1 /d X >nul
+if errorlevel 2 goto wait_tick_continue
+goto choose_endpoint
+:wait_tick_continue
+set /a WAIT_TICKS+=1
+if %WAIT_TICKS% LSS 3 goto wait_tick
 goto :loop
 
 
+:checkdns
+set "DNS_RESULT="
+set "DNS_RESULT_FILE=%TEMP%\connection_monitor_dns_%RANDOM%.tmp"
+start "" /b powershell -NoProfile -Command "try { Resolve-DnsName -Name $env:VERIFY_HOST -Server $env:DNS -DnsOnly -Quick -ErrorAction Stop | Out-Null; [IO.File]::WriteAllText($env:DNS_RESULT_FILE, 'OK') } catch { [IO.File]::WriteAllText($env:DNS_RESULT_FILE, 'FAIL') }"
+:checkdns_poll
+if exist "%DNS_RESULT_FILE%" (
+    set /p "DNS_RESULT="<"%DNS_RESULT_FILE%"
+    del "%DNS_RESULT_FILE%" >nul 2>&1
+    exit /b
+)
+choice /c 0X /n /t 1 /d X >nul
+if errorlevel 2 goto checkdns_poll
+goto choose_endpoint
 :log
 rem Keep and display only the five most recent log records.
 set "LOG5=%LOG4%"
@@ -112,7 +133,7 @@ echo ============================================================
 echo  Connection monitor - DNS testing every 3 seconds
 echo  Re-detects the DNS server your PC is using on every check,
 echo  verifies %VERIFY_HOST% through the active DNS server.
-echo  Press Ctrl+C to stop.   To try the voice: connection_monitor.bat test
+echo  Press 0 anytime to return to endpoint selection.  Ctrl+C to exit.
 echo ============================================================
 echo.
 if defined LOG5 echo %LOG5%
