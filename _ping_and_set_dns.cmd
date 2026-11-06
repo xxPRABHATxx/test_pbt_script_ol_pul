@@ -1,0 +1,386 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+title IP Ping Statistics and Ethernet DNS Manager
+color 0A
+
+REM ===== CONFIGURATION =====
+set "ADAPTER=Ethernet"
+set "TEMPFILE=%TEMP%\ping_test_%RANDOM%.txt"
+set "LOOKUPFILE=%TEMP%\dns_ipinfo_%RANDOM%.txt"
+set "CURRENTDNSCACHE=%LOCALAPPDATA%\PingDnsManager\current_dns_cache.json"
+if not exist "%LOCALAPPDATA%\PingDnsManager" md "%LOCALAPPDATA%\PingDnsManager" >nul 2>&1
+
+REM ===== CHOOSE IP LIST FILE =====
+:CHOOSEFILE
+set "INFO_LOADED="
+cls
+echo =====================================
+echo        SELECT IP LIST FILE
+echo =====================================
+echo.
+set /a FILECOUNT=0
+
+REM List every .txt file in the same folder as this script
+for %%F in ("%~dp0*.txt") do (
+    if exist "%%~fF" (
+        set /a FILECOUNT+=1
+        set "FILE[!FILECOUNT!]=%%~fF"
+        set "FILENAME[!FILECOUNT!]=%%~nxF"
+    )
+)
+
+if !FILECOUNT! EQU 0 (
+    echo No .txt files found in this folder.
+    echo.
+    echo Create a text file beside this script, for example:
+    echo   dns-google.txt
+    echo   Cloudflare.txt
+    echo   my-servers.txt
+    echo.
+    echo Put one IP address per line. Lines beginning with # are ignored.
+    pause
+    exit /b 1
+)
+
+for /l %%N in (1,1,!FILECOUNT!) do (
+    echo %%N. !FILENAME[%%N]!
+)
+echo.
+echo Q. Exit
+echo.
+set "FILECHOICE="
+set /p "FILECHOICE=Choose an IP list: "
+
+if /i "!FILECHOICE!"=="Q" goto END
+
+set "VALIDFILE="
+for /l %%N in (1,1,!FILECOUNT!) do (
+    if "!FILECHOICE!"=="%%N" set "VALIDFILE=1"
+)
+if not defined VALIDFILE (
+    echo Invalid selection.
+    pause
+    goto CHOOSEFILE
+)
+
+set "IPFILE=!FILE[%FILECHOICE%]!"
+
+REM ===== LOAD IP ADDRESSES =====
+set /a COUNT=0
+for /f "usebackq eol=# tokens=* delims=" %%I in ("!IPFILE!") do (
+    if not "%%I"=="" (
+        set /a COUNT+=1
+        set "IP[!COUNT!]=%%I"
+    )
+)
+
+if !COUNT! EQU 0 (
+    echo No IP addresses found in !FILENAME[%FILECHOICE%]!.
+    pause
+    goto CHOOSEFILE
+)
+
+REM ===== CHECK ONLINE IPS CONCURRENTLY =====
+call :RUNTESTS
+goto MENU
+
+:RUNTESTS
+cls
+echo =====================================
+echo       IP PING STATISTICS
+echo =====================================
+echo.
+echo Selected file: !FILENAME[%FILECHOICE%]!
+echo Testing all IPs concurrently. Please wait...
+echo.
+
+set /a ONLINE=0
+set "WORKDIR=%TEMP%\dns_ping_%RANDOM%_%RANDOM%"
+md "!WORKDIR!" >nul 2>&1
+
+REM Start one quick ping worker for every IP
+for /l %%N in (1,1,!COUNT!) do (
+    >"!WORKDIR!\quick_%%N.cmd" echo @echo off
+    >>"!WORKDIR!\quick_%%N.cmd" echo ping -n 1 -w 1500 "!IP[%%N]!" ^> "!WORKDIR!\quick_%%N.txt" 2^>^&1
+    >>"!WORKDIR!\quick_%%N.cmd" echo echo done ^> "!WORKDIR!\quick_%%N.done"
+    start "" /b cmd /c ""!WORKDIR!\quick_%%N.cmd""
+)
+
+REM Wait until every quick ping worker finishes
+:WAITQUICK
+set /a FINISHED=0
+for /l %%N in (1,1,!COUNT!) do if exist "!WORKDIR!\quick_%%N.done" set /a FINISHED+=1
+if !FINISHED! LSS !COUNT! (
+    >nul timeout /t 1 /nobreak
+    goto WAITQUICK
+)
+
+REM Only IPs that replied get detailed ping statistics; start those concurrently too
+set /a DETAILCOUNT=0
+for /l %%N in (1,1,!COUNT!) do (
+    findstr /i "TTL=" "!WORKDIR!\quick_%%N.txt" >nul 2>&1
+    if not errorlevel 1 (
+        set /a DETAILCOUNT+=1
+        set "DETAILIP[!DETAILCOUNT!]=!IP[%%N]!"
+        >"!WORKDIR!\detail_!DETAILCOUNT!.cmd" echo @echo off
+        >>"!WORKDIR!\detail_!DETAILCOUNT!.cmd" echo ping -n 4 -w 2000 "!IP[%%N]!" ^> "!WORKDIR!\detail_!DETAILCOUNT!.txt" 2^>^&1
+        >>"!WORKDIR!\detail_!DETAILCOUNT!.cmd" echo echo done ^> "!WORKDIR!\detail_!DETAILCOUNT!.done"
+        start "" /b cmd /c ""!WORKDIR!\detail_!DETAILCOUNT!.cmd""
+    )
+)
+
+if !DETAILCOUNT! GTR 0 goto WAITDETAIL
+goto TESTSDONE
+
+:WAITDETAIL
+set /a FINISHED=0
+for /l %%N in (1,1,!DETAILCOUNT!) do if exist "!WORKDIR!\detail_%%N.done" set /a FINISHED+=1
+if !FINISHED! LSS !DETAILCOUNT! (
+    >nul timeout /t 1 /nobreak
+    goto WAITDETAIL
+)
+
+:TESTSDONE
+REM Look up provider and location for every address in the selected list.
+if defined INFO_LOADED goto INFO_READY
+powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJABjAGEAYwBoAGUAPQBAAHsAfQAKACQAaQBuAHAAdQB0AEkAcABzAD0AQAAoAEcAZQB0AC0AQwBvAG4AdABlAG4AdAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABlAG4AdgA6AEkAUABGAEkATABFACAAfAAgAEYAbwByAEUAYQBjAGgALQBPAGIAagBlAGMAdAAgAHsAJABfAC4AVAByAGkAbQAoACkAfQAgAHwAIABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABfACAALQBhAG4AZAAgAC0AbgBvAHQAIAAkAF8ALgBTAHQAYQByAHQAcwBXAGkAdABoACgAJwAjACcAKQB9ACkACgAkAGMAdQByAHIAZQBuAHQARABuAHMAPQBAACgARwBlAHQALQBEAG4AcwBDAGwAaQBlAG4AdABTAGUAcgB2AGUAcgBBAGQAZAByAGUAcwBzACAALQBJAG4AdABlAHIAZgBhAGMAZQBBAGwAaQBhAHMAIAAkAGUAbgB2ADoAQQBEAEEAUABUAEUAUgAgAHwAIABGAG8AcgBFAGEAYwBoAC0ATwBiAGoAZQBjAHQAIAB7ACQAXwAuAFMAZQByAHYAZQByAEEAZABkAHIAZQBzAHMAZQBzAH0AIAB8ACAAUwBlAGwAZQBjAHQALQBPAGIAagBlAGMAdAAgAC0AVQBuAGkAcQB1AGUAKQAKACQAaQBwAHMAPQBAACgAJABpAG4AcAB1AHQASQBwAHMAIAArACAAJABjAHUAcgByAGUAbgB0AEQAbgBzACAAfAAgAFMAZQBsAGUAYwB0AC0ATwBiAGoAZQBjAHQAIAAtAFUAbgBpAHEAdQBlACkACgBmAG8AcgAoACQAcwB0AGEAcgB0AD0AMAA7ACQAcwB0AGEAcgB0ACAALQBsAHQAIAAkAGkAcABzAC4AQwBvAHUAbgB0ADsAJABzAHQAYQByAHQAKwA9ADEAMAAwACkAewAkAGwAYQBzAHQAPQBbAE0AYQB0AGgAXQA6ADoATQBpAG4AKAAkAHMAdABhAHIAdAArADkAOQAsACQAaQBwAHMALgBDAG8AdQBuAHQALQAxACkAOwAkAGMAaAB1AG4AawA9AEAAKAAkAGkAcABzAFsAJABzAHQAYQByAHQALgAuACQAbABhAHMAdABdACkAOwB0AHIAeQB7ACQAYQBuAHMAPQBJAG4AdgBvAGsAZQAtAFIAZQBzAHQATQBlAHQAaABvAGQAIAAtAFUAcgBpACAAJwBoAHQAdABwADoALwAvAGkAcAAtAGEAcABpAC4AYwBvAG0ALwBiAGEAdABjAGgAPwBmAGkAZQBsAGQAcwA9AHMAdABhAHQAdQBzACwAYwBvAHUAbgB0AHIAeQAsAHIAZQBnAGkAbwBuAE4AYQBtAGUALABjAGkAdAB5ACwAaQBzAHAALABvAHIAZwAsAGEAcwBuAGEAbQBlACwAcQB1AGUAcgB5ACcAIAAtAE0AZQB0AGgAbwBkACAAUABvAHMAdAAgAC0AQgBvAGQAeQAgACgAQwBvAG4AdgBlAHIAdABUAG8ALQBKAHMAbwBuACAALQBJAG4AcAB1AHQATwBiAGoAZQBjAHQAIAAkAGMAaAB1AG4AawAgAC0AQwBvAG0AcAByAGUAcwBzACkAIAAtAEMAbwBuAHQAZQBuAHQAVAB5AHAAZQAgACcAYQBwAHAAbABpAGMAYQB0AGkAbwBuAC8AagBzAG8AbgAnACAALQBUAGkAbQBlAG8AdQB0AFMAZQBjACAAMgAwADsAZgBvAHIAZQBhAGMAaAAoACQAeAAgAGkAbgAgAEAAKAAkAGEAbgBzACkAKQB7AGkAZgAoACQAeAAuAHMAdABhAHQAdQBzACAALQBlAHEAIAAnAHMAdQBjAGMAZQBzAHMAJwApAHsAJABwAD0AJAB4AC4AaQBzAHAAOwBpAGYAKAAhACQAcAApAHsAJABwAD0AJAB4AC4AbwByAGcAfQA7AGkAZgAoACEAJABwACkAewAkAHAAPQAkAHgALgBhAHMAbgBhAG0AZQB9ADsAJABsAD0AKABAACgAJAB4AC4AYwBpAHQAeQAsACQAeAAuAHIAZQBnAGkAbwBuAE4AYQBtAGUALAAkAHgALgBjAG8AdQBuAHQAcgB5ACkAfABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABfAH0AKQAgAC0AagBvAGkAbgAgACcALAAgACcAOwAkAGMAYQBjAGgAZQBbAFsAcwB0AHIAaQBuAGcAXQAkAHgALgBxAHUAZQByAHkAXQA9AEAAewBwAD0AJABwADsAbAA9ACQAbAB9AH0AfQB9AGMAYQB0AGMAaAB7AH0AfQAKAGYAbwByAGUAYQBjAGgAKAAkAGkAcAAgAGkAbgAgACQAaQBwAHMAKQB7AGkAZgAoACEAJABjAGEAYwBoAGUALgBDAG8AbgB0AGEAaQBuAHMASwBlAHkAKAAkAGkAcAApACkAewB0AHIAeQB7ACQAeAA9AEkAbgB2AG8AawBlAC0AUgBlAHMAdABNAGUAdABoAG8AZAAgAC0AVQByAGkAIAAoACcAaAB0AHQAcABzADoALwAvAGkAcABpAG4AZgBvAC4AaQBvAC8AJwArAFsAdQByAGkAXQA6ADoARQBzAGMAYQBwAGUARABhAHQAYQBTAHQAcgBpAG4AZwAoACQAaQBwACkAKwAnAC8AagBzAG8AbgAnACkAIAAtAFQAaQBtAGUAbwB1AHQAUwBlAGMAIAAyADAAOwAkAGwAPQAoAEAAKAAkAHgALgBjAGkAdAB5ACwAJAB4AC4AcgBlAGcAaQBvAG4ALAAkAHgALgBjAG8AdQBuAHQAcgB5ACkAfABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABfAH0AKQAgAC0AagBvAGkAbgAgACcALAAgACcAOwAkAGMAYQBjAGgAZQBbACQAaQBwAF0APQBAAHsAcAA9ACQAeAAuAG8AcgBnADsAbAA9ACQAbAB9AH0AYwBhAHQAYwBoAHsAJABjAGEAYwBoAGUAWwAkAGkAcABdAD0AQAB7AHAAPQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnADsAbAA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQB9AH0AOwAkAHAAPQAoAFsAcwB0AHIAaQBuAGcAXQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwACAALQByAGUAcABsAGEAYwBlACAAJwBcACgAPwBcAHMAKgBBAFMAXABkACsAXABzACoAXAApAD8AJwAsACcAJwAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwB8AFwAdABcAHIAXABuAF0AJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACQAbAA9ACgAWwBzAHQAcgBpAG4AZwBdACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAIAAtAHIAZQBwAGwAYQBjAGUAIAAnAFsAfABcAHQAXAByAFwAbgBdACcALAAnACAAJwApAC4AVAByAGkAbQAoACkAOwAnAEkAfAAnACsAJABpAHAAKwAnAHwAJwArACQAcAArACcAfAAnACsAJABsAH0ACgBmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGMAdQByAHIAZQBuAHQARABuAHMAKQB7ACQAcAA9ACgAWwBzAHQAcgBpAG4AZwBdACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAIAAtAHIAZQBwAGwAYQBjAGUAIAAnAFwAKAA/AFwAcwAqAEEAUwBcAGQAKwBcAHMAKgBcACkAPwAnACwAJwAnACAALQByAGUAcABsAGEAYwBlACAAJwBbAHwAXAB0AFwAcgBcAG4AXQAnACwAJwAgACcAKQAuAFQAcgBpAG0AKAApADsAJABsAD0AKABbAHMAdAByAGkAbgBnAF0AJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AbAAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwB8AFwAdABcAHIAXABuAF0AJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACcAQwB8ACcAKwAkAGkAcAArACcAfAAnACsAJABwACsAJwB8ACcAKwAkAGwAfQA= > "!LOOKUPFILE!" 2>nul
+set /a CURRENTCOUNT=0
+for /f "usebackq tokens=1-4 delims=|" %%A in ("!LOOKUPFILE!") do (
+    if "%%A"=="I" for /l %%K in (1,1,!COUNT!) do if "!IP[%%K]!"=="%%B" (
+        set "PROVIDER[%%K]=%%C"
+        set "LOCATION[%%K]=%%D"
+    )
+    if "%%A"=="C" (
+        set /a CURRENTCOUNT+=1
+        set "CURIP[!CURRENTCOUNT!]=%%B"
+        set "CURPROVIDER[!CURRENTCOUNT!]=%%C"
+        set "CURLOCATION[!CURRENTCOUNT!]=%%D"
+    )
+)
+del "!LOOKUPFILE!" >nul 2>&1
+set "INFO_LOADED=1"
+:INFO_READY
+set /a ONLINE=0
+for /l %%N in (1,1,!DETAILCOUNT!) do (
+    set /a ONLINE+=1
+    set "REF[!ONLINE!]=!DETAILIP[%%N]!"
+    set "REFPROVIDER[!ONLINE!]=Unavailable"
+    set "REFLOCATION[!ONLINE!]=Unavailable"
+    for /l %%K in (1,1,!COUNT!) do if "!IP[%%K]!"=="!DETAILIP[%%N]!" (
+        if defined PROVIDER[%%K] set "REFPROVIDER[!ONLINE!]=!PROVIDER[%%K]!"
+        if defined LOCATION[%%K] set "REFLOCATION[!ONLINE!]=!LOCATION[%%K]!"
+    )
+    set "MIN=N/A"
+    set "MAX=N/A"
+    set "AVG=N/A"
+    set "LOSS=N/A"
+    for /f "tokens=2,4,6 delims==, " %%A in ('findstr /i "Minimum =" "!WORKDIR!\detail_%%N.txt"') do (
+        set "MIN=%%A"
+        set "MAX=%%B"
+        set "AVG=%%C"
+    )
+    for /f "tokens=2 delims=()" %%A in ('findstr /i "Lost" "!WORKDIR!\detail_%%N.txt"') do set "LOSS=%%A"
+    set "REFMIN[!ONLINE!]=!MIN!"
+    set "REFMAX[!ONLINE!]=!MAX!"
+    set "REFAVG[!ONLINE!]=!AVG!"
+    set "REFLOSS[!ONLINE!]=!LOSS!"
+)
+
+rd /s /q "!WORKDIR!" >nul 2>&1
+exit /b
+REM ===== DISPLAY ONLY ONLINE IPS =====
+:MENU
+cls
+echo ==================================================
+echo          ONLINE IP PING RESULTS
+echo ==================================================
+echo Selected file: !FILENAME[%FILECHOICE%]!
+echo.
+
+if !ONLINE! EQU 0 (
+    if defined PINGLIMIT (
+        echo No IP addresses met the requirement of responding with average ping below !PINGLIMIT! ms.
+    ) else (
+        echo No ping-responsive IPs with readable average-ping results were found.
+    )
+    echo Note: some DNS servers block ICMP ping but could still answer DNS queries.
+) else (
+    echo REF  IP ADDRESS      MAX      AVG      LOSS         PROVIDER                 LOCATION
+    echo ---------------------------------------------------------------------------------------------------------------
+    for /l %%N in (1,1,!ONLINE!) do (
+        set "RIP=!REF[%%N]!                "
+        set "RIP=!RIP:~0,16!"
+        set "RMIN=!REFMIN[%%N]!        "
+        set "RMIN=!RMIN:~0,8!"
+        set "RMAX=!REFMAX[%%N]!        "
+        set "RMAX=!RMAX:~0,8!"
+        set "RAVG=!REFAVG[%%N]!        "
+        set "RAVG=!RAVG:~0,8!"
+        set "RLOSS=!REFLOSS[%%N]!          "
+        set "RLOSS=!RLOSS:~0,12!"
+        set "RPROV=!REFPROVIDER[%%N]!                        "
+        set "RPROV=!RPROV:~0,24!"
+        set "RLOC=!REFLOCATION[%%N]!                                  "
+        set "RLOC=!RLOC:~0,34!"
+        echo %%N.   !RIP! !RMAX! !RAVG! !RLOSS! !RPROV! !RLOC!
+	)
+)
+
+echo.
+echo ==================================================
+echo 1. Set Preferred DNS on Ethernet
+echo 2. Restore Ethernet DNS to DHCP
+echo 3. Refresh ping results
+echo 4. Choose another IP list
+echo 5. Exit
+echo ==================================================
+echo.
+set "CHOICE="
+set /p "CHOICE=Select option: "
+
+if "!CHOICE!"=="1" goto SETDNS
+if "!CHOICE!"=="2" goto DHCPDNS
+if "!CHOICE!"=="3" goto REFRESH
+if "!CHOICE!"=="4" goto CHOOSEFILE
+if "!CHOICE!"=="5" goto END
+
+echo Invalid option.
+pause
+goto MENU
+
+REM ===== SELECT ONLINE IP FOR DNS =====
+:SETDNS
+if !ONLINE! LEQ 0 (
+    echo No ping-responsive IPs are available in the current results.
+    echo You can scrape and test again, or use another DNS tool to verify a server.
+    pause
+    goto START
+)
+cls
+echo ============================================================
+echo                 SELECT PREFERRED DNS
+echo ============================================================
+echo REF   IP ADDRESS          AVG PING       PROVIDER                 LOCATION
+echo ----------------------------------------------------------------------------------------------------------
+for /l %%N in (1,1,!ONLINE!) do (
+    set "SIP=!REF[%%N]!                "
+    set "SIP=!SIP:~0,16!"
+    set "SAVG=!REFAVG[%%N]!        "
+    set "SAVG=!SAVG:~0,8!"
+    set "SPROV=!REFPROVIDER[%%N]!                        "
+    set "SPROV=!SPROV:~0,24!"
+    set "SLOC=!REFLOCATION[%%N]!                                  "
+    set "SLOC=!SLOC:~0,34!"
+    echo %%N.    !SIP!  !SAVG!  !SPROV! !SLOC!
+)
+
+echo.
+echo Current DNS configuration:
+call :SHOWCURRENTDNS
+echo.
+set "NUM="
+echo Enter a reference number, press Enter for next DNS, Backspace for previous, or 0 to return.
+set "DNSCHOICEFILE=%TEMP%\dns_choice_%RANDOM%.txt"
+set "DNSCHOICEFILE_ENV=!DNSCHOICEFILE!"
+powershell.exe -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; [Console]::Write('Enter reference number: '); $s=''; while($true){ $k=[Console]::ReadKey($true); if($k.Key -eq 'Enter'){ [Console]::WriteLine(); if($s.Length -eq 0){ $v='NEXT' } else { $v=$s }; break } elseif($k.Key -eq 'Backspace'){ if($s.Length -eq 0){ [Console]::WriteLine(); $v='PREV'; break } else { $s=$s.Substring(0,$s.Length-1); [Console]::Write([char]8+' '+[char]8) } } elseif($k.KeyChar -match '[0-9]'){ $s += $k.KeyChar; [Console]::Write($k.KeyChar) } }; Set-Content -LiteralPath $env:DNSCHOICEFILE_ENV -Value $v -NoNewline"
+if exist "!DNSCHOICEFILE!" set /p "NUM=" <"!DNSCHOICEFILE!"
+del "!DNSCHOICEFILE!" >nul 2>&1
+if "!NUM!"=="0" goto MENU
+if "!NUM!"=="NEXT" goto NEXTDNS
+if "!NUM!"=="PREV" goto PREVDNS
+set "VALID="
+for /l %%N in (1,1,!ONLINE!) do (
+    if "!NUM!"=="%%N" set "VALID=1"
+)
+
+if not defined VALID (
+    echo Invalid reference number.
+    pause
+    goto MENU
+)
+
+goto DNSSELECTED
+:NEXTDNS
+set /a NUM=0
+for /f "delims=" %%D in ('powershell.exe -NoProfile -Command "(Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER%' -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Select-Object -First 1"') do set "ACTIVE_DNS=%%D"
+for /l %%N in (1,1,!ONLINE!) do if /i "!REF[%%N]!"=="!ACTIVE_DNS!" set /a NUM=%%N
+if !NUM! GEQ !ONLINE! (set "NUM=1") else set /a NUM+=1
+set "VALID=1"
+goto DNSSELECTED
+
+:PREVDNS
+set /a NUM=1
+for /f "delims=" %%D in ('powershell.exe -NoProfile -Command "(Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER%' -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Select-Object -First 1"') do set "ACTIVE_DNS=%%D"
+for /l %%N in (1,1,!ONLINE!) do if /i "!REF[%%N]!"=="!ACTIVE_DNS!" set /a NUM=%%N
+if !NUM! LEQ 1 (set "NUM=!ONLINE!") else set /a NUM-=1
+set "VALID=1"
+goto DNSSELECTED
+
+:DNSSELECTED
+set "DNS=!REF[%NUM%]!"
+echo.
+echo Setting Ethernet Preferred DNS to !DNS! ...
+netsh interface ipv4 set dnsservers name="%ADAPTER%" source=static address=!DNS! register=primary validate=no
+
+if errorlevel 1 (
+    echo Failed to change DNS.
+    echo Check the adapter name and run this script as Administrator.
+) else (
+    echo Preferred DNS configured: !DNS!
+    ipconfig /flushdns
+)
+
+pause
+goto SETDNS
+
+REM ===== RESTORE DNS TO DHCP =====
+:DHCPDNS
+echo.
+echo Restoring Ethernet DNS to automatic DHCP...
+netsh interface ipv4 set dnsservers name="%ADAPTER%" source=dhcp
+
+if errorlevel 1 (
+    echo Failed to restore DNS.
+    echo Check the adapter name and run this script as Administrator.
+) else (
+    echo DNS is now configured for automatic DHCP.
+    ipconfig /flushdns
+    echo.
+    echo Updated DNS configuration:
+    call :SHOWCURRENTDNS
+)
+
+pause
+goto MENU
+
+:SHOWCURRENTDNS
+echo DNS IP             PROVIDER                 LOCATION
+echo ---------------------------------------------------------------
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJABpAHAAcwA9AEAAKABHAGUAdAAtAEQAbgBzAEMAbABpAGUAbgB0AFMAZQByAHYAZQByAEEAZABkAHIAZQBzAHMAIAAtAEkAbgB0AGUAcgBmAGEAYwBlAEEAbABpAGEAcwAgACQAZQBuAHYAOgBBAEQAQQBQAFQARQBSACAAfAAgAEYAbwByAEUAYQBjAGgALQBPAGIAagBlAGMAdAAgAHsAJABfAC4AUwBlAHIAdgBlAHIAQQBkAGQAcgBlAHMAcwBlAHMAfQAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAaQBmACgALQBuAG8AdAAgACQAaQBwAHMALgBDAG8AdQBuAHQAKQB7AFcAcgBpAHQAZQAtAE8AdQB0AHAAdQB0ACAAJwBOAG8AIABEAE4AUwAgAHMAZQByAHYAZQByAHMAIABkAGUAdABlAGMAdABlAGQAIABmAG8AcgAgAHQAaABpAHMAIABhAGQAYQBwAHQAZQByAC4AJwA7ACAAZQB4AGkAdAB9AAoAJABjAGEAYwBoAGUAUABhAHQAaAA9ACQAZQBuAHYAOgBDAFUAUgBSAEUATgBUAEQATgBTAEMAQQBDAEgARQAKACQAYwBhAGMAaABlAD0AQAB7AH0ACgBpAGYAKABUAGUAcwB0AC0AUABhAHQAaAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABjAGEAYwBoAGUAUABhAHQAaAApAHsAdAByAHkAewAkAHMAYQB2AGUAZAA9AEcAZQB0AC0AQwBvAG4AdABlAG4AdAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABjAGEAYwBoAGUAUABhAHQAaAAgAC0AUgBhAHcAIAB8ACAAQwBvAG4AdgBlAHIAdABGAHIAbwBtAC0ASgBzAG8AbgA7AGkAZgAoACQAcwBhAHYAZQBkACkAewBmAG8AcgBlAGEAYwBoACgAJABwAHIAbwBwACAAaQBuACAAJABzAGEAdgBlAGQALgBQAFMATwBiAGoAZQBjAHQALgBQAHIAbwBwAGUAcgB0AGkAZQBzACkAewAkAGMAYQBjAGgAZQBbACQAcAByAG8AcAAuAE4AYQBtAGUAXQA9ACQAcAByAG8AcAAuAFYAYQBsAHUAZQB9AH0AfQBjAGEAdABjAGgAewB9AH0ACgAkAGMAYQBjAGgAZQBDAGgAYQBuAGcAZQBkAD0AJABmAGEAbABzAGUACgAkAG0AaQBzAHMAaQBuAGcAPQBAACgAJABpAHAAcwAgAHwAIABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABpAHAAPQBbAHMAdAByAGkAbgBnAF0AJABfADsALQBuAG8AdAAgACQAYwBhAGMAaABlAC4AQwBvAG4AdABhAGkAbgBzAEsAZQB5ACgAJABpAHAAKQAgAC0AbwByACAALQBuAG8AdAAgACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAFAAcgBvAHYAaQBkAGUAcgAgAC0AbwByACAALQBuAG8AdAAgACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAEwAbwBjAGEAdABpAG8AbgAgAC0AbwByACAAJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AUAByAG8AdgBpAGQAZQByACAALQBlAHEAIAAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnACAALQBvAHIAIAAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBMAG8AYwBhAHQAaQBvAG4AIAAtAGUAcQAgACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQApAAoAZgBvAHIAKAAkAHMAdABhAHIAdAA9ADAAOwAkAHMAdABhAHIAdAAgAC0AbAB0ACAAJABtAGkAcwBzAGkAbgBnAC4AQwBvAHUAbgB0ADsAJABzAHQAYQByAHQAKwA9ADEAMAAwACkAewAKACAAJABsAGEAcwB0AD0AWwBNAGEAdABoAF0AOgA6AE0AaQBuACgAJABzAHQAYQByAHQAKwA5ADkALAAkAG0AaQBzAHMAaQBuAGcALgBDAG8AdQBuAHQALQAxACkAOwAkAGMAaAB1AG4AawA9AEAAKAAkAG0AaQBzAHMAaQBuAGcAWwAkAHMAdABhAHIAdAAuAC4AJABsAGEAcwB0AF0AKQAKACAAdAByAHkAewAkAGEAbgBzAHcAZQByAD0ASQBuAHYAbwBrAGUALQBSAGUAcwB0AE0AZQB0AGgAbwBkACAALQBVAHIAaQAgACcAaAB0AHQAcAA6AC8ALwBpAHAALQBhAHAAaQAuAGMAbwBtAC8AYgBhAHQAYwBoAD8AZgBpAGUAbABkAHMAPQBzAHQAYQB0AHUAcwAsAGMAbwB1AG4AdAByAHkALAByAGUAZwBpAG8AbgBOAGEAbQBlACwAYwBpAHQAeQAsAGkAcwBwACwAbwByAGcALABhAHMAbgBhAG0AZQAsAHEAdQBlAHIAeQAnACAALQBNAGUAdABoAG8AZAAgAFAAbwBzAHQAIAAtAEIAbwBkAHkAIAAoAEMAbwBuAHYAZQByAHQAVABvAC0ASgBzAG8AbgAgAC0ASQBuAHAAdQB0AE8AYgBqAGUAYwB0ACAAJABjAGgAdQBuAGsAIAAtAEMAbwBtAHAAcgBlAHMAcwApACAALQBDAG8AbgB0AGUAbgB0AFQAeQBwAGUAIAAnAGEAcABwAGwAaQBjAGEAdABpAG8AbgAvAGoAcwBvAG4AJwAgAC0AVABpAG0AZQBvAHUAdABTAGUAYwAgADIAMAAKACAAIABmAG8AcgBlAGEAYwBoACgAJABpAHQAZQBtACAAaQBuACAAQAAoACQAYQBuAHMAdwBlAHIAKQApAHsAaQBmACgAJABpAHQAZQBtAC4AcwB0AGEAdAB1AHMAIAAtAGUAcQAgACcAcwB1AGMAYwBlAHMAcwAnACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAaQB0AGUAbQAuAGkAcwBwADsAaQBmACgALQBuAG8AdAAgACQAcAByAG8AdgBpAGQAZQByACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAaQB0AGUAbQAuAG8AcgBnAH0AOwBpAGYAKAAtAG4AbwB0ACAAJABwAHIAbwB2AGkAZABlAHIAKQB7ACQAcAByAG8AdgBpAGQAZQByAD0AJABpAHQAZQBtAC4AYQBzAG4AYQBtAGUAfQA7ACQAcABhAHIAdABzAD0AQAAoACQAaQB0AGUAbQAuAGMAaQB0AHkALAAkAGkAdABlAG0ALgByAGUAZwBpAG8AbgBOAGEAbQBlACwAJABpAHQAZQBtAC4AYwBvAHUAbgB0AHIAeQApADsAJABsAG8AYwBhAHQAaQBvAG4APQAoAEAAKAAkAHAAYQByAHQAcwB8AFcAaABlAHIAZQAtAE8AYgBqAGUAYwB0ACAAewAkAF8AfQApACAALQBqAG8AaQBuACAAJwAsACAAJwApADsAaQBmACgAJABwAHIAbwB2AGkAZABlAHIAIAAtAGEAbgBkACAAJABsAG8AYwBhAHQAaQBvAG4AKQB7ACQAYwBhAGMAaABlAFsAWwBzAHQAcgBpAG4AZwBdACQAaQB0AGUAbQAuAHEAdQBlAHIAeQBdAD0AQAB7AFAAcgBvAHYAaQBkAGUAcgA9AFsAcwB0AHIAaQBuAGcAXQAkAHAAcgBvAHYAaQBkAGUAcgA7AEwAbwBjAGEAdABpAG8AbgA9AFsAcwB0AHIAaQBuAGcAXQAkAGwAbwBjAGEAdABpAG8AbgB9ADsAJABjAGEAYwBoAGUAQwBoAGEAbgBnAGUAZAA9ACQAdAByAHUAZQB9AH0AfQAKACAAfQBjAGEAdABjAGgAewB9AAoAIABmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGMAaAB1AG4AawApAHsAJABrAGUAeQA9AFsAcwB0AHIAaQBuAGcAXQAkAGkAcAA7AGkAZgAoAC0AbgBvAHQAIAAkAGMAYQBjAGgAZQAuAEMAbwBuAHQAYQBpAG4AcwBLAGUAeQAoACQAawBlAHkAKQAgAC0AbwByACAALQBuAG8AdAAgACQAYwBhAGMAaABlAFsAJABrAGUAeQBdAC4AUAByAG8AdgBpAGQAZQByACAALQBvAHIAIAAtAG4AbwB0ACAAJABjAGEAYwBoAGUAWwAkAGsAZQB5AF0ALgBMAG8AYwBhAHQAaQBvAG4AIAAtAG8AcgAgACQAYwBhAGMAaABlAFsAJABrAGUAeQBdAC4AUAByAG8AdgBpAGQAZQByACAALQBlAHEAIAAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnACAALQBvAHIAIAAkAGMAYQBjAGgAZQBbACQAawBlAHkAXQAuAEwAbwBjAGEAdABpAG8AbgAgAC0AZQBxACAAJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwApAHsACgAgACAAdAByAHkAewAkAHgAPQBJAG4AdgBvAGsAZQAtAFIAZQBzAHQATQBlAHQAaABvAGQAIAAtAFUAcgBpACAAKAAnAGgAdAB0AHAAcwA6AC8ALwBpAHAAaQBuAGYAbwAuAGkAbwAvACcAKwBbAHUAcgBpAF0AOgA6AEUAcwBjAGEAcABlAEQAYQB0AGEAUwB0AHIAaQBuAGcAKAAkAGsAZQB5ACkAKwAnAC8AagBzAG8AbgAnACkAIAAtAFQAaQBtAGUAbwB1AHQAUwBlAGMAIAAyADAAOwAkAHAAcgBvAHYAaQBkAGUAcgA9ACgAWwBzAHQAcgBpAG4AZwBdACQAeAAuAG8AcgBnACAALQByAGUAcABsAGEAYwBlACAAJwBcACgAPwBcAHMAKgBBAFMAXABkACsAXABzACoAXAApAD8AJwAsACcAJwApAC4AVAByAGkAbQAoACkAOwAkAHAAYQByAHQAcwA9AEAAKAAkAHgALgBjAGkAdAB5ACwAJAB4AC4AcgBlAGcAaQBvAG4ALAAkAHgALgBjAG8AdQBuAHQAcgB5ACkAOwAkAGwAbwBjAGEAdABpAG8AbgA9ACgAQAAoACQAcABhAHIAdABzAHwAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACQAXwB9ACkAIAAtAGoAbwBpAG4AIAAnACwAIAAnACkAOwBpAGYAKAAkAHAAcgBvAHYAaQBkAGUAcgAgAC0AYQBuAGQAIAAkAGwAbwBjAGEAdABpAG8AbgApAHsAJABjAGEAYwBoAGUAWwAkAGsAZQB5AF0APQBAAHsAUAByAG8AdgBpAGQAZQByAD0AJABwAHIAbwB2AGkAZABlAHIAOwBMAG8AYwBhAHQAaQBvAG4APQAkAGwAbwBjAGEAdABpAG8AbgB9ADsAJABjAGEAYwBoAGUAQwBoAGEAbgBnAGUAZAA9ACQAdAByAHUAZQB9AH0AYwBhAHQAYwBoAHsAfQAKACAAfQB9AAoAfQAKAGkAZgAoACQAYwBhAGMAaABlAEMAaABhAG4AZwBlAGQAKQB7AHQAcgB5AHsAJABjAGEAYwBoAGUAfABDAG8AbgB2AGUAcgB0AFQAbwAtAEoAcwBvAG4AIAAtAEQAZQBwAHQAaAAgADQAfABTAGUAdAAtAEMAbwBuAHQAZQBuAHQAIAAtAEwAaQB0AGUAcgBhAGwAUABhAHQAaAAgACQAYwBhAGMAaABlAFAAYQB0AGgAIAAtAEUAbgBjAG8AZABpAG4AZwAgAFUAVABGADgAfQBjAGEAdABjAGgAewB9AH0ACgBmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGkAcABzACkAewAkAGUAbgB0AHIAeQA9ACQAYwBhAGMAaABlAFsAWwBzAHQAcgBpAG4AZwBdACQAaQBwAF0AOwAkAHAAcgBvAHYAaQBkAGUAcgA9ACgAWwBzAHQAcgBpAG4AZwBdACQAZQBuAHQAcgB5AC4AUAByAG8AdgBpAGQAZQByACAALQByAGUAcABsAGEAYwBlACAAJwBcACgAPwBcAHMAKgBBAFMAXABkACsAXABzACoAXAApAD8AJwAsACcAJwApAC4AVAByAGkAbQAoACkAOwAkAGwAbwBjAGEAdABpAG8AbgA9ACgAWwBzAHQAcgBpAG4AZwBdACQAZQBuAHQAcgB5AC4ATABvAGMAYQB0AGkAbwBuACAALQByAGUAcABsAGEAYwBlACAAJwBbAHwAXAB0AFwAcgBcAG4AXQAnACwAJwAgACcAKQAuAFQAcgBpAG0AKAApADsAaQBmACgALQBuAG8AdAAgACQAcAByAG8AdgBpAGQAZQByACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQA7AGkAZgAoAC0AbgBvAHQAIAAkAGwAbwBjAGEAdABpAG8AbgApAHsAJABsAG8AYwBhAHQAaQBvAG4APQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnAH0AOwAnAHsAMAAsAC0AMQA2AH0AIAB7ADEALAAtADIANAB9ACAAewAyAH0AJwAgAC0AZgAgACQAaQBwACwAJABwAHIAbwB2AGkAZABlAHIALAAkAGwAbwBjAGEAdABpAG8AbgB9AA==
+goto :eof
+exit /b
+
+REM ===== REFRESH RESULTS =====
+:REFRESH
+goto LOADAGAIN
+
+:LOADAGAIN
+set /a COUNT=0
+for /f "usebackq eol=# tokens=* delims=" %%I in ("!IPFILE!") do (
+    if not "%%I"=="" (
+        set /a COUNT+=1
+        set "IP[!COUNT!]=%%I"
+    )
+)
+call :RUNTESTS
+goto MENU
+
+REM ===== EXIT =====
+:END
+del "!TEMPFILE!" >nul 2>&1
+del "!LOOKUPFILE!" >nul 2>&1
+endlocal
+exit /b
+
+
