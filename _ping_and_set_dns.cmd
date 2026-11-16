@@ -1,386 +1,618 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
-
-title IP Ping Statistics and Ethernet DNS Manager
+title IP Ping Statistics and DNS Manager
 color 0A
-
-REM ===== CONFIGURATION =====
-set "ADAPTER=Ethernet"
-set "TEMPFILE=%TEMP%\ping_test_%RANDOM%.txt"
-set "LOOKUPFILE=%TEMP%\dns_ipinfo_%RANDOM%.txt"
-set "CURRENTDNSCACHE=%LOCALAPPDATA%\PingDnsManager\current_dns_cache.json"
-if not exist "%LOCALAPPDATA%\PingDnsManager" md "%LOCALAPPDATA%\PingDnsManager" >nul 2>&1
-
-REM ===== CHOOSE IP LIST FILE =====
-:CHOOSEFILE
-set "INFO_LOADED="
-cls
-echo =====================================
-echo        SELECT IP LIST FILE
-echo =====================================
-echo.
-set /a FILECOUNT=0
-
-REM List every .txt file in the same folder as this script
-for %%F in ("%~dp0*.txt") do (
-    if exist "%%~fF" (
-        set /a FILECOUNT+=1
-        set "FILE[!FILECOUNT!]=%%~fF"
-        set "FILENAME[!FILECOUNT!]=%%~nxF"
-    )
-)
-
-if !FILECOUNT! EQU 0 (
-    echo No .txt files found in this folder.
-    echo.
-    echo Create a text file beside this script, for example:
-    echo   dns-google.txt
-    echo   Cloudflare.txt
-    echo   my-servers.txt
-    echo.
-    echo Put one IP address per line. Lines beginning with # are ignored.
-    pause
-    exit /b 1
-)
-
-for /l %%N in (1,1,!FILECOUNT!) do (
-    echo %%N. !FILENAME[%%N]!
-)
-echo.
-echo Q. Exit
-echo.
-set "FILECHOICE="
-set /p "FILECHOICE=Choose an IP list: "
-
-if /i "!FILECHOICE!"=="Q" goto END
-
-set "VALIDFILE="
-for /l %%N in (1,1,!FILECOUNT!) do (
-    if "!FILECHOICE!"=="%%N" set "VALIDFILE=1"
-)
-if not defined VALIDFILE (
-    echo Invalid selection.
-    pause
-    goto CHOOSEFILE
-)
-
-set "IPFILE=!FILE[%FILECHOICE%]!"
-
-REM ===== LOAD IP ADDRESSES =====
-set /a COUNT=0
-for /f "usebackq eol=# tokens=* delims=" %%I in ("!IPFILE!") do (
-    if not "%%I"=="" (
-        set /a COUNT+=1
-        set "IP[!COUNT!]=%%I"
-    )
-)
-
-if !COUNT! EQU 0 (
-    echo No IP addresses found in !FILENAME[%FILECHOICE%]!.
-    pause
-    goto CHOOSEFILE
-)
-
-REM ===== CHECK ONLINE IPS CONCURRENTLY =====
-call :RUNTESTS
-goto MENU
-
-:RUNTESTS
-cls
-echo =====================================
-echo       IP PING STATISTICS
-echo =====================================
-echo.
-echo Selected file: !FILENAME[%FILECHOICE%]!
-echo Testing all IPs concurrently. Please wait...
-echo.
-
-set /a ONLINE=0
-set "WORKDIR=%TEMP%\dns_ping_%RANDOM%_%RANDOM%"
-md "!WORKDIR!" >nul 2>&1
-
-REM Start one quick ping worker for every IP
-for /l %%N in (1,1,!COUNT!) do (
-    >"!WORKDIR!\quick_%%N.cmd" echo @echo off
-    >>"!WORKDIR!\quick_%%N.cmd" echo ping -n 1 -w 1500 "!IP[%%N]!" ^> "!WORKDIR!\quick_%%N.txt" 2^>^&1
-    >>"!WORKDIR!\quick_%%N.cmd" echo echo done ^> "!WORKDIR!\quick_%%N.done"
-    start "" /b cmd /c ""!WORKDIR!\quick_%%N.cmd""
-)
-
-REM Wait until every quick ping worker finishes
-:WAITQUICK
-set /a FINISHED=0
-for /l %%N in (1,1,!COUNT!) do if exist "!WORKDIR!\quick_%%N.done" set /a FINISHED+=1
-if !FINISHED! LSS !COUNT! (
-    >nul timeout /t 1 /nobreak
-    goto WAITQUICK
-)
-
-REM Only IPs that replied get detailed ping statistics; start those concurrently too
-set /a DETAILCOUNT=0
-for /l %%N in (1,1,!COUNT!) do (
-    findstr /i "TTL=" "!WORKDIR!\quick_%%N.txt" >nul 2>&1
-    if not errorlevel 1 (
-        set /a DETAILCOUNT+=1
-        set "DETAILIP[!DETAILCOUNT!]=!IP[%%N]!"
-        >"!WORKDIR!\detail_!DETAILCOUNT!.cmd" echo @echo off
-        >>"!WORKDIR!\detail_!DETAILCOUNT!.cmd" echo ping -n 4 -w 2000 "!IP[%%N]!" ^> "!WORKDIR!\detail_!DETAILCOUNT!.txt" 2^>^&1
-        >>"!WORKDIR!\detail_!DETAILCOUNT!.cmd" echo echo done ^> "!WORKDIR!\detail_!DETAILCOUNT!.done"
-        start "" /b cmd /c ""!WORKDIR!\detail_!DETAILCOUNT!.cmd""
-    )
-)
-
-if !DETAILCOUNT! GTR 0 goto WAITDETAIL
-goto TESTSDONE
-
-:WAITDETAIL
-set /a FINISHED=0
-for /l %%N in (1,1,!DETAILCOUNT!) do if exist "!WORKDIR!\detail_%%N.done" set /a FINISHED+=1
-if !FINISHED! LSS !DETAILCOUNT! (
-    >nul timeout /t 1 /nobreak
-    goto WAITDETAIL
-)
-
-:TESTSDONE
-REM Look up provider and location for every address in the selected list.
-if defined INFO_LOADED goto INFO_READY
-powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJABjAGEAYwBoAGUAPQBAAHsAfQAKACQAaQBuAHAAdQB0AEkAcABzAD0AQAAoAEcAZQB0AC0AQwBvAG4AdABlAG4AdAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABlAG4AdgA6AEkAUABGAEkATABFACAAfAAgAEYAbwByAEUAYQBjAGgALQBPAGIAagBlAGMAdAAgAHsAJABfAC4AVAByAGkAbQAoACkAfQAgAHwAIABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABfACAALQBhAG4AZAAgAC0AbgBvAHQAIAAkAF8ALgBTAHQAYQByAHQAcwBXAGkAdABoACgAJwAjACcAKQB9ACkACgAkAGMAdQByAHIAZQBuAHQARABuAHMAPQBAACgARwBlAHQALQBEAG4AcwBDAGwAaQBlAG4AdABTAGUAcgB2AGUAcgBBAGQAZAByAGUAcwBzACAALQBJAG4AdABlAHIAZgBhAGMAZQBBAGwAaQBhAHMAIAAkAGUAbgB2ADoAQQBEAEEAUABUAEUAUgAgAHwAIABGAG8AcgBFAGEAYwBoAC0ATwBiAGoAZQBjAHQAIAB7ACQAXwAuAFMAZQByAHYAZQByAEEAZABkAHIAZQBzAHMAZQBzAH0AIAB8ACAAUwBlAGwAZQBjAHQALQBPAGIAagBlAGMAdAAgAC0AVQBuAGkAcQB1AGUAKQAKACQAaQBwAHMAPQBAACgAJABpAG4AcAB1AHQASQBwAHMAIAArACAAJABjAHUAcgByAGUAbgB0AEQAbgBzACAAfAAgAFMAZQBsAGUAYwB0AC0ATwBiAGoAZQBjAHQAIAAtAFUAbgBpAHEAdQBlACkACgBmAG8AcgAoACQAcwB0AGEAcgB0AD0AMAA7ACQAcwB0AGEAcgB0ACAALQBsAHQAIAAkAGkAcABzAC4AQwBvAHUAbgB0ADsAJABzAHQAYQByAHQAKwA9ADEAMAAwACkAewAkAGwAYQBzAHQAPQBbAE0AYQB0AGgAXQA6ADoATQBpAG4AKAAkAHMAdABhAHIAdAArADkAOQAsACQAaQBwAHMALgBDAG8AdQBuAHQALQAxACkAOwAkAGMAaAB1AG4AawA9AEAAKAAkAGkAcABzAFsAJABzAHQAYQByAHQALgAuACQAbABhAHMAdABdACkAOwB0AHIAeQB7ACQAYQBuAHMAPQBJAG4AdgBvAGsAZQAtAFIAZQBzAHQATQBlAHQAaABvAGQAIAAtAFUAcgBpACAAJwBoAHQAdABwADoALwAvAGkAcAAtAGEAcABpAC4AYwBvAG0ALwBiAGEAdABjAGgAPwBmAGkAZQBsAGQAcwA9AHMAdABhAHQAdQBzACwAYwBvAHUAbgB0AHIAeQAsAHIAZQBnAGkAbwBuAE4AYQBtAGUALABjAGkAdAB5ACwAaQBzAHAALABvAHIAZwAsAGEAcwBuAGEAbQBlACwAcQB1AGUAcgB5ACcAIAAtAE0AZQB0AGgAbwBkACAAUABvAHMAdAAgAC0AQgBvAGQAeQAgACgAQwBvAG4AdgBlAHIAdABUAG8ALQBKAHMAbwBuACAALQBJAG4AcAB1AHQATwBiAGoAZQBjAHQAIAAkAGMAaAB1AG4AawAgAC0AQwBvAG0AcAByAGUAcwBzACkAIAAtAEMAbwBuAHQAZQBuAHQAVAB5AHAAZQAgACcAYQBwAHAAbABpAGMAYQB0AGkAbwBuAC8AagBzAG8AbgAnACAALQBUAGkAbQBlAG8AdQB0AFMAZQBjACAAMgAwADsAZgBvAHIAZQBhAGMAaAAoACQAeAAgAGkAbgAgAEAAKAAkAGEAbgBzACkAKQB7AGkAZgAoACQAeAAuAHMAdABhAHQAdQBzACAALQBlAHEAIAAnAHMAdQBjAGMAZQBzAHMAJwApAHsAJABwAD0AJAB4AC4AaQBzAHAAOwBpAGYAKAAhACQAcAApAHsAJABwAD0AJAB4AC4AbwByAGcAfQA7AGkAZgAoACEAJABwACkAewAkAHAAPQAkAHgALgBhAHMAbgBhAG0AZQB9ADsAJABsAD0AKABAACgAJAB4AC4AYwBpAHQAeQAsACQAeAAuAHIAZQBnAGkAbwBuAE4AYQBtAGUALAAkAHgALgBjAG8AdQBuAHQAcgB5ACkAfABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABfAH0AKQAgAC0AagBvAGkAbgAgACcALAAgACcAOwAkAGMAYQBjAGgAZQBbAFsAcwB0AHIAaQBuAGcAXQAkAHgALgBxAHUAZQByAHkAXQA9AEAAewBwAD0AJABwADsAbAA9ACQAbAB9AH0AfQB9AGMAYQB0AGMAaAB7AH0AfQAKAGYAbwByAGUAYQBjAGgAKAAkAGkAcAAgAGkAbgAgACQAaQBwAHMAKQB7AGkAZgAoACEAJABjAGEAYwBoAGUALgBDAG8AbgB0AGEAaQBuAHMASwBlAHkAKAAkAGkAcAApACkAewB0AHIAeQB7ACQAeAA9AEkAbgB2AG8AawBlAC0AUgBlAHMAdABNAGUAdABoAG8AZAAgAC0AVQByAGkAIAAoACcAaAB0AHQAcABzADoALwAvAGkAcABpAG4AZgBvAC4AaQBvAC8AJwArAFsAdQByAGkAXQA6ADoARQBzAGMAYQBwAGUARABhAHQAYQBTAHQAcgBpAG4AZwAoACQAaQBwACkAKwAnAC8AagBzAG8AbgAnACkAIAAtAFQAaQBtAGUAbwB1AHQAUwBlAGMAIAAyADAAOwAkAGwAPQAoAEAAKAAkAHgALgBjAGkAdAB5ACwAJAB4AC4AcgBlAGcAaQBvAG4ALAAkAHgALgBjAG8AdQBuAHQAcgB5ACkAfABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABfAH0AKQAgAC0AagBvAGkAbgAgACcALAAgACcAOwAkAGMAYQBjAGgAZQBbACQAaQBwAF0APQBAAHsAcAA9ACQAeAAuAG8AcgBnADsAbAA9ACQAbAB9AH0AYwBhAHQAYwBoAHsAJABjAGEAYwBoAGUAWwAkAGkAcABdAD0AQAB7AHAAPQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnADsAbAA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQB9AH0AOwAkAHAAPQAoAFsAcwB0AHIAaQBuAGcAXQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwACAALQByAGUAcABsAGEAYwBlACAAJwBcACgAPwBcAHMAKgBBAFMAXABkACsAXABzACoAXAApAD8AJwAsACcAJwAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwB8AFwAdABcAHIAXABuAF0AJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACQAbAA9ACgAWwBzAHQAcgBpAG4AZwBdACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAIAAtAHIAZQBwAGwAYQBjAGUAIAAnAFsAfABcAHQAXAByAFwAbgBdACcALAAnACAAJwApAC4AVAByAGkAbQAoACkAOwAnAEkAfAAnACsAJABpAHAAKwAnAHwAJwArACQAcAArACcAfAAnACsAJABsAH0ACgBmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGMAdQByAHIAZQBuAHQARABuAHMAKQB7ACQAcAA9ACgAWwBzAHQAcgBpAG4AZwBdACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAIAAtAHIAZQBwAGwAYQBjAGUAIAAnAFwAKAA/AFwAcwAqAEEAUwBcAGQAKwBcAHMAKgBcACkAPwAnACwAJwAnACAALQByAGUAcABsAGEAYwBlACAAJwBbAHwAXAB0AFwAcgBcAG4AXQAnACwAJwAgACcAKQAuAFQAcgBpAG0AKAApADsAJABsAD0AKABbAHMAdAByAGkAbgBnAF0AJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AbAAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwB8AFwAdABcAHIAXABuAF0AJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACcAQwB8ACcAKwAkAGkAcAArACcAfAAnACsAJABwACsAJwB8ACcAKwAkAGwAfQA= > "!LOOKUPFILE!" 2>nul
-set /a CURRENTCOUNT=0
-for /f "usebackq tokens=1-4 delims=|" %%A in ("!LOOKUPFILE!") do (
-    if "%%A"=="I" for /l %%K in (1,1,!COUNT!) do if "!IP[%%K]!"=="%%B" (
-        set "PROVIDER[%%K]=%%C"
-        set "LOCATION[%%K]=%%D"
-    )
-    if "%%A"=="C" (
-        set /a CURRENTCOUNT+=1
-        set "CURIP[!CURRENTCOUNT!]=%%B"
-        set "CURPROVIDER[!CURRENTCOUNT!]=%%C"
-        set "CURLOCATION[!CURRENTCOUNT!]=%%D"
-    )
-)
-del "!LOOKUPFILE!" >nul 2>&1
-set "INFO_LOADED=1"
-:INFO_READY
-set /a ONLINE=0
-for /l %%N in (1,1,!DETAILCOUNT!) do (
-    set /a ONLINE+=1
-    set "REF[!ONLINE!]=!DETAILIP[%%N]!"
-    set "REFPROVIDER[!ONLINE!]=Unavailable"
-    set "REFLOCATION[!ONLINE!]=Unavailable"
-    for /l %%K in (1,1,!COUNT!) do if "!IP[%%K]!"=="!DETAILIP[%%N]!" (
-        if defined PROVIDER[%%K] set "REFPROVIDER[!ONLINE!]=!PROVIDER[%%K]!"
-        if defined LOCATION[%%K] set "REFLOCATION[!ONLINE!]=!LOCATION[%%K]!"
-    )
-    set "MIN=N/A"
-    set "MAX=N/A"
-    set "AVG=N/A"
-    set "LOSS=N/A"
-    for /f "tokens=2,4,6 delims==, " %%A in ('findstr /i "Minimum =" "!WORKDIR!\detail_%%N.txt"') do (
-        set "MIN=%%A"
-        set "MAX=%%B"
-        set "AVG=%%C"
-    )
-    for /f "tokens=2 delims=()" %%A in ('findstr /i "Lost" "!WORKDIR!\detail_%%N.txt"') do set "LOSS=%%A"
-    set "REFMIN[!ONLINE!]=!MIN!"
-    set "REFMAX[!ONLINE!]=!MAX!"
-    set "REFAVG[!ONLINE!]=!AVG!"
-    set "REFLOSS[!ONLINE!]=!LOSS!"
-)
-
-rd /s /q "!WORKDIR!" >nul 2>&1
+REM ---- needs Administrator to change DNS; re-launch elevated once ----
+fltmc >nul 2>&1 && goto :admin
+if /i "%~1"=="/elevated" goto :noadmin
+powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '/elevated' -Verb RunAs"
+if errorlevel 1 (echo Elevation was cancelled. & pause)
 exit /b
-REM ===== DISPLAY ONLY ONLINE IPS =====
-:MENU
-cls
-echo ==================================================
-echo          ONLINE IP PING RESULTS
-echo ==================================================
-echo Selected file: !FILENAME[%FILECHOICE%]!
-echo.
-
-if !ONLINE! EQU 0 (
-    if defined PINGLIMIT (
-        echo No IP addresses met the requirement of responding with average ping below !PINGLIMIT! ms.
-    ) else (
-        echo No ping-responsive IPs with readable average-ping results were found.
-    )
-    echo Note: some DNS servers block ICMP ping but could still answer DNS queries.
-) else (
-    echo REF  IP ADDRESS      MAX      AVG      LOSS         PROVIDER                 LOCATION
-    echo ---------------------------------------------------------------------------------------------------------------
-    for /l %%N in (1,1,!ONLINE!) do (
-        set "RIP=!REF[%%N]!                "
-        set "RIP=!RIP:~0,16!"
-        set "RMIN=!REFMIN[%%N]!        "
-        set "RMIN=!RMIN:~0,8!"
-        set "RMAX=!REFMAX[%%N]!        "
-        set "RMAX=!RMAX:~0,8!"
-        set "RAVG=!REFAVG[%%N]!        "
-        set "RAVG=!RAVG:~0,8!"
-        set "RLOSS=!REFLOSS[%%N]!          "
-        set "RLOSS=!RLOSS:~0,12!"
-        set "RPROV=!REFPROVIDER[%%N]!                        "
-        set "RPROV=!RPROV:~0,24!"
-        set "RLOC=!REFLOCATION[%%N]!                                  "
-        set "RLOC=!RLOC:~0,34!"
-        echo %%N.   !RIP! !RMAX! !RAVG! !RLOSS! !RPROV! !RLOC!
-	)
-)
-
-echo.
-echo ==================================================
-echo 1. Set Preferred DNS on Ethernet
-echo 2. Restore Ethernet DNS to DHCP
-echo 3. Refresh ping results
-echo 4. Choose another IP list
-echo 5. Exit
-echo ==================================================
-echo.
-set "CHOICE="
-set /p "CHOICE=Select option: "
-
-if "!CHOICE!"=="1" goto SETDNS
-if "!CHOICE!"=="2" goto DHCPDNS
-if "!CHOICE!"=="3" goto REFRESH
-if "!CHOICE!"=="4" goto CHOOSEFILE
-if "!CHOICE!"=="5" goto END
-
-echo Invalid option.
+:noadmin
+echo Administrator rights are required to change DNS settings.
 pause
-goto MENU
-
-REM ===== SELECT ONLINE IP FOR DNS =====
-:SETDNS
-if !ONLINE! LEQ 0 (
-    echo No ping-responsive IPs are available in the current results.
-    echo You can scrape and test again, or use another DNS tool to verify a server.
-    pause
-    goto START
-)
-cls
-echo ============================================================
-echo                 SELECT PREFERRED DNS
-echo ============================================================
-echo REF   IP ADDRESS          AVG PING       PROVIDER                 LOCATION
-echo ----------------------------------------------------------------------------------------------------------
-for /l %%N in (1,1,!ONLINE!) do (
-    set "SIP=!REF[%%N]!                "
-    set "SIP=!SIP:~0,16!"
-    set "SAVG=!REFAVG[%%N]!        "
-    set "SAVG=!SAVG:~0,8!"
-    set "SPROV=!REFPROVIDER[%%N]!                        "
-    set "SPROV=!SPROV:~0,24!"
-    set "SLOC=!REFLOCATION[%%N]!                                  "
-    set "SLOC=!SLOC:~0,34!"
-    echo %%N.    !SIP!  !SAVG!  !SPROV! !SLOC!
-)
-
-echo.
-echo Current DNS configuration:
-call :SHOWCURRENTDNS
-echo.
-set "NUM="
-echo Enter a reference number, press Enter for next DNS, Backspace for previous, or 0 to return.
-set "DNSCHOICEFILE=%TEMP%\dns_choice_%RANDOM%.txt"
-set "DNSCHOICEFILE_ENV=!DNSCHOICEFILE!"
-powershell.exe -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; [Console]::Write('Enter reference number: '); $s=''; while($true){ $k=[Console]::ReadKey($true); if($k.Key -eq 'Enter'){ [Console]::WriteLine(); if($s.Length -eq 0){ $v='NEXT' } else { $v=$s }; break } elseif($k.Key -eq 'Backspace'){ if($s.Length -eq 0){ [Console]::WriteLine(); $v='PREV'; break } else { $s=$s.Substring(0,$s.Length-1); [Console]::Write([char]8+' '+[char]8) } } elseif($k.KeyChar -match '[0-9]'){ $s += $k.KeyChar; [Console]::Write($k.KeyChar) } }; Set-Content -LiteralPath $env:DNSCHOICEFILE_ENV -Value $v -NoNewline"
-if exist "!DNSCHOICEFILE!" set /p "NUM=" <"!DNSCHOICEFILE!"
-del "!DNSCHOICEFILE!" >nul 2>&1
-if "!NUM!"=="0" goto MENU
-if "!NUM!"=="NEXT" goto NEXTDNS
-if "!NUM!"=="PREV" goto PREVDNS
-set "VALID="
-for /l %%N in (1,1,!ONLINE!) do (
-    if "!NUM!"=="%%N" set "VALID=1"
-)
-
-if not defined VALID (
-    echo Invalid reference number.
-    pause
-    goto MENU
-)
-
-goto DNSSELECTED
-:NEXTDNS
-set /a NUM=0
-for /f "delims=" %%D in ('powershell.exe -NoProfile -Command "(Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER%' -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Select-Object -First 1"') do set "ACTIVE_DNS=%%D"
-for /l %%N in (1,1,!ONLINE!) do if /i "!REF[%%N]!"=="!ACTIVE_DNS!" set /a NUM=%%N
-if !NUM! GEQ !ONLINE! (set "NUM=1") else set /a NUM+=1
-set "VALID=1"
-goto DNSSELECTED
-
-:PREVDNS
-set /a NUM=1
-for /f "delims=" %%D in ('powershell.exe -NoProfile -Command "(Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER%' -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Select-Object -First 1"') do set "ACTIVE_DNS=%%D"
-for /l %%N in (1,1,!ONLINE!) do if /i "!REF[%%N]!"=="!ACTIVE_DNS!" set /a NUM=%%N
-if !NUM! LEQ 1 (set "NUM=!ONLINE!") else set /a NUM-=1
-set "VALID=1"
-goto DNSSELECTED
-
-:DNSSELECTED
-set "DNS=!REF[%NUM%]!"
-echo.
-echo Setting Ethernet Preferred DNS to !DNS! ...
-netsh interface ipv4 set dnsservers name="%ADAPTER%" source=static address=!DNS! register=primary validate=no
-
-if errorlevel 1 (
-    echo Failed to change DNS.
-    echo Check the adapter name and run this script as Administrator.
-) else (
-    echo Preferred DNS configured: !DNS!
-    ipconfig /flushdns
-)
-
-pause
-goto SETDNS
-
-REM ===== RESTORE DNS TO DHCP =====
-:DHCPDNS
-echo.
-echo Restoring Ethernet DNS to automatic DHCP...
-netsh interface ipv4 set dnsservers name="%ADAPTER%" source=dhcp
-
-if errorlevel 1 (
-    echo Failed to restore DNS.
-    echo Check the adapter name and run this script as Administrator.
-) else (
-    echo DNS is now configured for automatic DHCP.
-    ipconfig /flushdns
-    echo.
-    echo Updated DNS configuration:
-    call :SHOWCURRENTDNS
-)
-
-pause
-goto MENU
-
-:SHOWCURRENTDNS
-echo DNS IP             PROVIDER                 LOCATION
-echo ---------------------------------------------------------------
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJABpAHAAcwA9AEAAKABHAGUAdAAtAEQAbgBzAEMAbABpAGUAbgB0AFMAZQByAHYAZQByAEEAZABkAHIAZQBzAHMAIAAtAEkAbgB0AGUAcgBmAGEAYwBlAEEAbABpAGEAcwAgACQAZQBuAHYAOgBBAEQAQQBQAFQARQBSACAAfAAgAEYAbwByAEUAYQBjAGgALQBPAGIAagBlAGMAdAAgAHsAJABfAC4AUwBlAHIAdgBlAHIAQQBkAGQAcgBlAHMAcwBlAHMAfQAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAaQBmACgALQBuAG8AdAAgACQAaQBwAHMALgBDAG8AdQBuAHQAKQB7AFcAcgBpAHQAZQAtAE8AdQB0AHAAdQB0ACAAJwBOAG8AIABEAE4AUwAgAHMAZQByAHYAZQByAHMAIABkAGUAdABlAGMAdABlAGQAIABmAG8AcgAgAHQAaABpAHMAIABhAGQAYQBwAHQAZQByAC4AJwA7ACAAZQB4AGkAdAB9AAoAJABjAGEAYwBoAGUAUABhAHQAaAA9ACQAZQBuAHYAOgBDAFUAUgBSAEUATgBUAEQATgBTAEMAQQBDAEgARQAKACQAYwBhAGMAaABlAD0AQAB7AH0ACgBpAGYAKABUAGUAcwB0AC0AUABhAHQAaAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABjAGEAYwBoAGUAUABhAHQAaAApAHsAdAByAHkAewAkAHMAYQB2AGUAZAA9AEcAZQB0AC0AQwBvAG4AdABlAG4AdAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABjAGEAYwBoAGUAUABhAHQAaAAgAC0AUgBhAHcAIAB8ACAAQwBvAG4AdgBlAHIAdABGAHIAbwBtAC0ASgBzAG8AbgA7AGkAZgAoACQAcwBhAHYAZQBkACkAewBmAG8AcgBlAGEAYwBoACgAJABwAHIAbwBwACAAaQBuACAAJABzAGEAdgBlAGQALgBQAFMATwBiAGoAZQBjAHQALgBQAHIAbwBwAGUAcgB0AGkAZQBzACkAewAkAGMAYQBjAGgAZQBbACQAcAByAG8AcAAuAE4AYQBtAGUAXQA9ACQAcAByAG8AcAAuAFYAYQBsAHUAZQB9AH0AfQBjAGEAdABjAGgAewB9AH0ACgAkAGMAYQBjAGgAZQBDAGgAYQBuAGcAZQBkAD0AJABmAGEAbABzAGUACgAkAG0AaQBzAHMAaQBuAGcAPQBAACgAJABpAHAAcwAgAHwAIABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAJABpAHAAPQBbAHMAdAByAGkAbgBnAF0AJABfADsALQBuAG8AdAAgACQAYwBhAGMAaABlAC4AQwBvAG4AdABhAGkAbgBzAEsAZQB5ACgAJABpAHAAKQAgAC0AbwByACAALQBuAG8AdAAgACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAFAAcgBvAHYAaQBkAGUAcgAgAC0AbwByACAALQBuAG8AdAAgACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAEwAbwBjAGEAdABpAG8AbgAgAC0AbwByACAAJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AUAByAG8AdgBpAGQAZQByACAALQBlAHEAIAAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnACAALQBvAHIAIAAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBMAG8AYwBhAHQAaQBvAG4AIAAtAGUAcQAgACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQApAAoAZgBvAHIAKAAkAHMAdABhAHIAdAA9ADAAOwAkAHMAdABhAHIAdAAgAC0AbAB0ACAAJABtAGkAcwBzAGkAbgBnAC4AQwBvAHUAbgB0ADsAJABzAHQAYQByAHQAKwA9ADEAMAAwACkAewAKACAAJABsAGEAcwB0AD0AWwBNAGEAdABoAF0AOgA6AE0AaQBuACgAJABzAHQAYQByAHQAKwA5ADkALAAkAG0AaQBzAHMAaQBuAGcALgBDAG8AdQBuAHQALQAxACkAOwAkAGMAaAB1AG4AawA9AEAAKAAkAG0AaQBzAHMAaQBuAGcAWwAkAHMAdABhAHIAdAAuAC4AJABsAGEAcwB0AF0AKQAKACAAdAByAHkAewAkAGEAbgBzAHcAZQByAD0ASQBuAHYAbwBrAGUALQBSAGUAcwB0AE0AZQB0AGgAbwBkACAALQBVAHIAaQAgACcAaAB0AHQAcAA6AC8ALwBpAHAALQBhAHAAaQAuAGMAbwBtAC8AYgBhAHQAYwBoAD8AZgBpAGUAbABkAHMAPQBzAHQAYQB0AHUAcwAsAGMAbwB1AG4AdAByAHkALAByAGUAZwBpAG8AbgBOAGEAbQBlACwAYwBpAHQAeQAsAGkAcwBwACwAbwByAGcALABhAHMAbgBhAG0AZQAsAHEAdQBlAHIAeQAnACAALQBNAGUAdABoAG8AZAAgAFAAbwBzAHQAIAAtAEIAbwBkAHkAIAAoAEMAbwBuAHYAZQByAHQAVABvAC0ASgBzAG8AbgAgAC0ASQBuAHAAdQB0AE8AYgBqAGUAYwB0ACAAJABjAGgAdQBuAGsAIAAtAEMAbwBtAHAAcgBlAHMAcwApACAALQBDAG8AbgB0AGUAbgB0AFQAeQBwAGUAIAAnAGEAcABwAGwAaQBjAGEAdABpAG8AbgAvAGoAcwBvAG4AJwAgAC0AVABpAG0AZQBvAHUAdABTAGUAYwAgADIAMAAKACAAIABmAG8AcgBlAGEAYwBoACgAJABpAHQAZQBtACAAaQBuACAAQAAoACQAYQBuAHMAdwBlAHIAKQApAHsAaQBmACgAJABpAHQAZQBtAC4AcwB0AGEAdAB1AHMAIAAtAGUAcQAgACcAcwB1AGMAYwBlAHMAcwAnACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAaQB0AGUAbQAuAGkAcwBwADsAaQBmACgALQBuAG8AdAAgACQAcAByAG8AdgBpAGQAZQByACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAaQB0AGUAbQAuAG8AcgBnAH0AOwBpAGYAKAAtAG4AbwB0ACAAJABwAHIAbwB2AGkAZABlAHIAKQB7ACQAcAByAG8AdgBpAGQAZQByAD0AJABpAHQAZQBtAC4AYQBzAG4AYQBtAGUAfQA7ACQAcABhAHIAdABzAD0AQAAoACQAaQB0AGUAbQAuAGMAaQB0AHkALAAkAGkAdABlAG0ALgByAGUAZwBpAG8AbgBOAGEAbQBlACwAJABpAHQAZQBtAC4AYwBvAHUAbgB0AHIAeQApADsAJABsAG8AYwBhAHQAaQBvAG4APQAoAEAAKAAkAHAAYQByAHQAcwB8AFcAaABlAHIAZQAtAE8AYgBqAGUAYwB0ACAAewAkAF8AfQApACAALQBqAG8AaQBuACAAJwAsACAAJwApADsAaQBmACgAJABwAHIAbwB2AGkAZABlAHIAIAAtAGEAbgBkACAAJABsAG8AYwBhAHQAaQBvAG4AKQB7ACQAYwBhAGMAaABlAFsAWwBzAHQAcgBpAG4AZwBdACQAaQB0AGUAbQAuAHEAdQBlAHIAeQBdAD0AQAB7AFAAcgBvAHYAaQBkAGUAcgA9AFsAcwB0AHIAaQBuAGcAXQAkAHAAcgBvAHYAaQBkAGUAcgA7AEwAbwBjAGEAdABpAG8AbgA9AFsAcwB0AHIAaQBuAGcAXQAkAGwAbwBjAGEAdABpAG8AbgB9ADsAJABjAGEAYwBoAGUAQwBoAGEAbgBnAGUAZAA9ACQAdAByAHUAZQB9AH0AfQAKACAAfQBjAGEAdABjAGgAewB9AAoAIABmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGMAaAB1AG4AawApAHsAJABrAGUAeQA9AFsAcwB0AHIAaQBuAGcAXQAkAGkAcAA7AGkAZgAoAC0AbgBvAHQAIAAkAGMAYQBjAGgAZQAuAEMAbwBuAHQAYQBpAG4AcwBLAGUAeQAoACQAawBlAHkAKQAgAC0AbwByACAALQBuAG8AdAAgACQAYwBhAGMAaABlAFsAJABrAGUAeQBdAC4AUAByAG8AdgBpAGQAZQByACAALQBvAHIAIAAtAG4AbwB0ACAAJABjAGEAYwBoAGUAWwAkAGsAZQB5AF0ALgBMAG8AYwBhAHQAaQBvAG4AIAAtAG8AcgAgACQAYwBhAGMAaABlAFsAJABrAGUAeQBdAC4AUAByAG8AdgBpAGQAZQByACAALQBlAHEAIAAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnACAALQBvAHIAIAAkAGMAYQBjAGgAZQBbACQAawBlAHkAXQAuAEwAbwBjAGEAdABpAG8AbgAgAC0AZQBxACAAJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwApAHsACgAgACAAdAByAHkAewAkAHgAPQBJAG4AdgBvAGsAZQAtAFIAZQBzAHQATQBlAHQAaABvAGQAIAAtAFUAcgBpACAAKAAnAGgAdAB0AHAAcwA6AC8ALwBpAHAAaQBuAGYAbwAuAGkAbwAvACcAKwBbAHUAcgBpAF0AOgA6AEUAcwBjAGEAcABlAEQAYQB0AGEAUwB0AHIAaQBuAGcAKAAkAGsAZQB5ACkAKwAnAC8AagBzAG8AbgAnACkAIAAtAFQAaQBtAGUAbwB1AHQAUwBlAGMAIAAyADAAOwAkAHAAcgBvAHYAaQBkAGUAcgA9ACgAWwBzAHQAcgBpAG4AZwBdACQAeAAuAG8AcgBnACAALQByAGUAcABsAGEAYwBlACAAJwBcACgAPwBcAHMAKgBBAFMAXABkACsAXABzACoAXAApAD8AJwAsACcAJwApAC4AVAByAGkAbQAoACkAOwAkAHAAYQByAHQAcwA9AEAAKAAkAHgALgBjAGkAdAB5ACwAJAB4AC4AcgBlAGcAaQBvAG4ALAAkAHgALgBjAG8AdQBuAHQAcgB5ACkAOwAkAGwAbwBjAGEAdABpAG8AbgA9ACgAQAAoACQAcABhAHIAdABzAHwAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACQAXwB9ACkAIAAtAGoAbwBpAG4AIAAnACwAIAAnACkAOwBpAGYAKAAkAHAAcgBvAHYAaQBkAGUAcgAgAC0AYQBuAGQAIAAkAGwAbwBjAGEAdABpAG8AbgApAHsAJABjAGEAYwBoAGUAWwAkAGsAZQB5AF0APQBAAHsAUAByAG8AdgBpAGQAZQByAD0AJABwAHIAbwB2AGkAZABlAHIAOwBMAG8AYwBhAHQAaQBvAG4APQAkAGwAbwBjAGEAdABpAG8AbgB9ADsAJABjAGEAYwBoAGUAQwBoAGEAbgBnAGUAZAA9ACQAdAByAHUAZQB9AH0AYwBhAHQAYwBoAHsAfQAKACAAfQB9AAoAfQAKAGkAZgAoACQAYwBhAGMAaABlAEMAaABhAG4AZwBlAGQAKQB7AHQAcgB5AHsAJABjAGEAYwBoAGUAfABDAG8AbgB2AGUAcgB0AFQAbwAtAEoAcwBvAG4AIAAtAEQAZQBwAHQAaAAgADQAfABTAGUAdAAtAEMAbwBuAHQAZQBuAHQAIAAtAEwAaQB0AGUAcgBhAGwAUABhAHQAaAAgACQAYwBhAGMAaABlAFAAYQB0AGgAIAAtAEUAbgBjAG8AZABpAG4AZwAgAFUAVABGADgAfQBjAGEAdABjAGgAewB9AH0ACgBmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGkAcABzACkAewAkAGUAbgB0AHIAeQA9ACQAYwBhAGMAaABlAFsAWwBzAHQAcgBpAG4AZwBdACQAaQBwAF0AOwAkAHAAcgBvAHYAaQBkAGUAcgA9ACgAWwBzAHQAcgBpAG4AZwBdACQAZQBuAHQAcgB5AC4AUAByAG8AdgBpAGQAZQByACAALQByAGUAcABsAGEAYwBlACAAJwBcACgAPwBcAHMAKgBBAFMAXABkACsAXABzACoAXAApAD8AJwAsACcAJwApAC4AVAByAGkAbQAoACkAOwAkAGwAbwBjAGEAdABpAG8AbgA9ACgAWwBzAHQAcgBpAG4AZwBdACQAZQBuAHQAcgB5AC4ATABvAGMAYQB0AGkAbwBuACAALQByAGUAcABsAGEAYwBlACAAJwBbAHwAXAB0AFwAcgBcAG4AXQAnACwAJwAgACcAKQAuAFQAcgBpAG0AKAApADsAaQBmACgALQBuAG8AdAAgACQAcAByAG8AdgBpAGQAZQByACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQA7AGkAZgAoAC0AbgBvAHQAIAAkAGwAbwBjAGEAdABpAG8AbgApAHsAJABsAG8AYwBhAHQAaQBvAG4APQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnAH0AOwAnAHsAMAAsAC0AMQA2AH0AIAB7ADEALAAtADIANAB9ACAAewAyAH0AJwAgAC0AZgAgACQAaQBwACwAJABwAHIAbwB2AGkAZABlAHIALAAkAGwAbwBjAGEAdABpAG8AbgB9AA==
-goto :eof
+exit /b 1
+:admin
+set "SELF=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText($env:SELF); $i=$t.IndexOf('##PS'+'BEGIN##'); & ([scriptblock]::Create($t.Substring($i)))"
 exit /b
+##PSBEGIN##
+# =====================================================================
+#  IP Ping Statistics + DNS Manager   (PowerShell part, runs from the .cmd above)
+#  Put .txt files (one IP per line, '#' = comment) next to this script.
+# =====================================================================
 
-REM ===== REFRESH RESULTS =====
-:REFRESH
-goto LOADAGAIN
+# ---------------- CONFIG ----------------
+$AdapterName = ''             # '' = auto-detect the adapter that carries the default route; or 'Ethernet' / 'Wi-Fi'
+$Rounds      = 4              # probes per server
+$TimeoutMs   = 1000           # per-probe timeout
+$Threads     = 64             # servers probed at the same time (one thread each)
+$ConnPort    = 443            # CONN ms = TCP connect time to this port on the address the DNS server returned
+$ConnTimeoutMs = 1500         # TCP connect timeout
+$ProbeName   = 'example.com'  # name used in the DNS test query
+# ----------------------------------------
 
-:LOADAGAIN
-set /a COUNT=0
-for /f "usebackq eol=# tokens=* delims=" %%I in ("!IPFILE!") do (
-    if not "%%I"=="" (
-        set /a COUNT+=1
-        set "IP[!COUNT!]=%%I"
-    )
-)
-call :RUNTESTS
-goto MENU
+$Host.UI.RawUI.WindowTitle = 'IP Ping Statistics and DNS Manager'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$ScriptDir = Split-Path -Parent $env:SELF
+$DataDir   = Join-Path $env:LOCALAPPDATA 'PingDnsManager'
+$GeoCache  = Join-Path $DataDir 'geo_cache.json'
 
-REM ===== EXIT =====
-:END
-del "!TEMPFILE!" >nul 2>&1
-del "!LOOKUPFILE!" >nul 2>&1
-endlocal
-exit /b
+$script:GeoOffline = $false
+$script:Results    = @()
+$script:Ips        = @()
+$script:IpFile     = ''
+$script:BadLines   = 0
+$script:Elapsed    = 0
+$script:Adapter    = ''
+$script:CurDns     = @()
+$script:Status     = ''
 
+# ---------------- helpers ----------------
+function Wait-Key { Write-Host ''; Write-Host 'Press any key to continue...'; [void][Console]::ReadKey($true) }
 
+function Fit([string]$s, [int]$w) {
+    $s = $s -replace '[\x00-\x1f]', ' '
+    if ($s.Length -gt $w) { $s.Substring(0, $w) } else { $s }
+}
+
+function Fmt($v) { if ($null -eq $v) { '-' } else { "$v" } }
+
+function Get-ActiveAdapter {
+    if ($AdapterName) { return $AdapterName }
+    $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+         Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1
+    if ($r) { return $r.InterfaceAlias }
+    return 'Ethernet'
+}
+
+function Get-CurrentDns {
+    $a = Get-DnsClientServerAddress -InterfaceAlias $script:Adapter -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    if ($a) { @($a.ServerAddresses | Where-Object { $_ }) } else { @() }
+}
+
+# ---------------- IP list ----------------
+function Select-IpFile {
+    $files = @(Get-ChildItem -LiteralPath $ScriptDir -Filter *.txt -File | Sort-Object Name)
+    if (-not $files.Count) {
+        Clear-Host
+        Write-Host 'No .txt files found in this folder.'
+        Write-Host ''
+        Write-Host 'Create a text file beside this script (e.g. dns-google.txt) with one IP per line.'
+        Write-Host 'Lines starting with # are ignored.'
+        Wait-Key
+        return $null
+    }
+    if ($files.Count -eq 1) { return $files[0].FullName }
+    while ($true) {
+        Clear-Host
+        Write-Host '====================================='
+        Write-Host '        SELECT IP LIST FILE'
+        Write-Host '====================================='
+        Write-Host ''
+        for ($i = 0; $i -lt $files.Count; $i++) { Write-Host ('{0}. {1}' -f ($i + 1), $files[$i].Name) }
+        Write-Host ''
+        Write-Host 'Q. Exit'
+        Write-Host ''
+        $c = Read-Host 'Choose an IP list'
+        if ($c -match '^[qQ]$') { return $null }
+        if ($c -match '^\d+$' -and [int]$c -ge 1 -and [int]$c -le $files.Count) { return $files[[int]$c - 1].FullName }
+        Write-Host 'Invalid selection.' -ForegroundColor Yellow
+        Start-Sleep -Seconds 1
+    }
+}
+
+function Read-IpList([string]$Path) {
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $list = New-Object 'System.Collections.Generic.List[string]'
+    $script:BadLines = 0
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $t = ($line -replace '#.*$', '').Trim()
+        if (-not $t) { continue }
+        $tok  = ($t -split '[\s,;]+')[0]
+        $addr = $null
+        if ($tok -match '^\d{1,3}(\.\d{1,3}){3}$' -and [System.Net.IPAddress]::TryParse($tok, [ref]$addr)) {
+            if ($seen.Add($addr.ToString())) { $list.Add($addr.ToString()) }
+        } else { $script:BadLines++ }
+    }
+    $script:Ips = $list.ToArray()
+}
+
+# ---------------- probing ----------------
+# One job per server, each in its own thread. Every ping, DNS lookup and TCP connect is timed by a
+# blocking call, so the number is taken the moment the answer arrives (no batching delay in the times).
+$Worker = {
+    param([string]$Ip, [int]$Rounds, [int]$TimeoutMs, [string]$QName, [int]$Port, [int]$ConnLimitMs)
+
+    function Skip-Name([byte[]]$d, [int]$p) {
+        while ($p -lt $d.Length) {
+            $l = $d[$p]
+            if ($l -eq 0) { return ($p + 1) }
+            if (($l -band 0xC0) -eq 0xC0) { return ($p + 2) }
+            $p += $l + 1
+        }
+        return $p
+    }
+
+    # One A lookup sent straight to $Server on UDP port 53. Returns @{Ms; Addr} or $null.
+    function Query-A([string]$Server, [string]$Name, [int]$LimitMs) {
+        $udp = $null
+        try {
+            $rid = Get-Random -Minimum 1 -Maximum 65535
+            $hi = [byte]($rid -shr 8)
+            $lo = [byte]($rid -band 255)
+            $q = New-Object System.Collections.Generic.List[byte]
+            $q.Add($hi)
+            $q.Add($lo)
+            $q.AddRange([byte[]](1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            foreach ($label in $Name.Split('.')) {
+                $lb = [System.Text.Encoding]::ASCII.GetBytes($label)
+                $q.Add([byte]$lb.Length)
+                $q.AddRange($lb)
+            }
+            $q.AddRange([byte[]](0, 0, 1, 0, 1))
+            $pkt = $q.ToArray()
+            $udp = New-Object System.Net.Sockets.UdpClient
+            $udp.Client.ReceiveTimeout = $LimitMs
+            $udp.Client.SendTimeout = $LimitMs
+            $udp.Connect($Server, 53)
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            [void]$udp.Send($pkt, $pkt.Length)
+            $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+            $r = $udp.Receive([ref]$ep)
+            $sw.Stop()
+            # valid reply: same ID, QR bit set, RCODE = 0 (NOERROR)
+            if ($r.Length -lt 12 -or $r[0] -ne $hi -or $r[1] -ne $lo) { return $null }
+            if (($r[2] -band 0x80) -eq 0) { return $null }
+            if (($r[3] -band 0x0F) -ne 0) { return $null }
+            $qd = ($r[4] * 256) + $r[5]
+            $an = ($r[6] * 256) + $r[7]
+            $p = 12
+            for ($i = 0; $i -lt $qd; $i++) { $p = Skip-Name $r $p; $p += 4 }
+            for ($i = 0; $i -lt $an; $i++) {
+                $p = Skip-Name $r $p
+                $type = ($r[$p] * 256) + $r[$p + 1]
+                $rdlen = ($r[$p + 8] * 256) + $r[$p + 9]
+                $p += 10
+                if ($type -eq 1 -and $rdlen -eq 4) {
+                    $text = '{0}.{1}.{2}.{3}' -f $r[$p], $r[$p + 1], $r[$p + 2], $r[$p + 3]
+                    return @{ Ms = $sw.Elapsed.TotalMilliseconds; Addr = $text }
+                }
+                $p += $rdlen
+            }
+            return $null
+        } catch {
+            return $null
+        } finally {
+            if ($null -ne $udp) { $udp.Close() }
+        }
+    }
+
+    $dns  = New-Object 'System.Collections.Generic.List[double]'
+    $icmp = New-Object 'System.Collections.Generic.List[double]'
+    $addr = $null
+    for ($round = 0; $round -lt $Rounds; $round++) {
+        $pinger = New-Object System.Net.NetworkInformation.Ping
+        try {
+            $reply = $pinger.Send($Ip, $TimeoutMs)
+            if ($null -ne $reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) { $icmp.Add([double]$reply.RoundtripTime) }
+        } catch { } finally { $pinger.Dispose() }
+
+        $res = Query-A $Ip $QName $TimeoutMs
+        if ($null -ne $res) { $dns.Add([double]$res.Ms); $addr = $res.Addr }
+
+        # nothing came back in the first round: this server is down, do not spend more time on it
+        if ($round -eq 0 -and $icmp.Count -eq 0 -and $dns.Count -eq 0) { break }
+    }
+
+    # CONN ms: TCP connect to the address this DNS server returned for the test name
+    $connOut = $null
+    if ($null -ne $addr -and $Port -gt 0) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $iar = $client.BeginConnect($addr, $Port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($ConnLimitMs) -and $client.Connected) {
+                $client.EndConnect($iar)
+                $watch.Stop()
+                $connOut = [int][Math]::Round($watch.Elapsed.TotalMilliseconds)
+            }
+        } catch { } finally { $client.Close() }
+    }
+
+    $dnsOut = $null
+    if ($dns.Count) { $dnsOut = [int][Math]::Round(($dns | Measure-Object -Average).Average) }
+    $icmpOut = $null
+    if ($icmp.Count) { $icmpOut = [int][Math]::Round(($icmp | Measure-Object -Average).Average) }
+    [pscustomobject]@{
+        Ip      = $Ip
+        DnsAvg  = $dnsOut
+        IcmpAvg = $icmpOut
+        Conn    = $connOut
+        Loss    = [int][Math]::Round(100.0 * ($Rounds - $dns.Count) / $Rounds)
+    }
+}
+
+function Measure-Servers([string[]]$Ips) {
+    $total    = $Ips.Count
+    $nThreads = [Math]::Max(1, [Math]::Min($Threads, $total))
+    $script1  = $Worker.ToString()
+    $pool = [runspacefactory]::CreateRunspacePool(1, $nThreads)
+    $pool.Open()
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        # Jobs are queued ahead (twice the thread count) so the pool never waits; results stay in list order.
+        $window    = $nThreads * 2
+        $jobs      = New-Object 'object[]' $total
+        $submitted = 0
+        for ($done = 0; $done -lt $total; $done++) {
+            while ($submitted -lt $total -and ($submitted - $done) -lt $window) {
+                $shell = [powershell]::Create()
+                $shell.RunspacePool = $pool
+                [void]$shell.AddScript($script1)
+                [void]$shell.AddArgument($Ips[$submitted])
+                [void]$shell.AddArgument($Rounds)
+                [void]$shell.AddArgument($TimeoutMs)
+                [void]$shell.AddArgument($ProbeName)
+                [void]$shell.AddArgument($ConnPort)
+                [void]$shell.AddArgument($ConnTimeoutMs)
+                $jobs[$submitted] = [pscustomobject]@{ Ip = $Ips[$submitted]; Shell = $shell; Handle = $shell.BeginInvoke() }
+                $submitted++
+            }
+            $job = $jobs[$done]
+            $jobs[$done] = $null
+            $res = $null
+            try {
+                $o = @($job.Shell.EndInvoke($job.Handle))
+                if ($o.Count -gt 0) { $res = $o[$o.Count - 1] }
+            } catch { }
+            try { $job.Shell.Dispose() } catch { }
+            if ($null -eq $res) { $res = [pscustomobject]@{ Ip = $job.Ip; DnsAvg = $null; IcmpAvg = $null; Conn = $null; Loss = 100 } }
+            $out.Add([pscustomobject]@{
+                Ip       = $res.Ip
+                DnsAvg   = $res.DnsAvg
+                IcmpAvg  = $res.IcmpAvg
+                ConnAvg  = $res.Conn
+                Loss     = $res.Loss
+                Provider = 'Unavailable'
+                Location = 'Unavailable'
+            })
+            if ((($done + 1) % 10) -eq 0 -or ($done + 1) -eq $total) {
+                Write-Host -NoNewline ("`r  Tested {0} of {1} servers ..." -f ($done + 1), $total)
+            }
+        }
+    } finally {
+        try { $pool.Close(); $pool.Dispose() } catch { }
+    }
+    Write-Host ''
+    return $out.ToArray()
+}
+
+# ---------------- provider / location (cached on disk) ----------------
+function Get-GeoInfo([string[]]$Ips) {
+    $cache = @{}
+    if (Test-Path -LiteralPath $GeoCache) {
+        try {
+            $saved = Get-Content -LiteralPath $GeoCache -Raw | ConvertFrom-Json
+            foreach ($p in $saved.PSObject.Properties) {
+                $cache[$p.Name] = @{ Provider = [string]$p.Value.Provider; Location = [string]$p.Value.Location }
+            }
+        } catch { }
+    }
+    $changed = $false
+    $need = @($Ips | Where-Object { $_ -and -not $cache.ContainsKey($_) })
+
+    if ($need.Count -and -not $script:GeoOffline) {
+        for ($o = 0; $o -lt $need.Count; $o += 100) {
+            $chunk = @($need[$o..([Math]::Min($o + 99, $need.Count - 1))])
+            try {
+                $ans = Invoke-RestMethod -Uri 'http://ip-api.com/batch?fields=status,country,regionName,city,isp,org,asname,query' `
+                        -Method Post -Body (ConvertTo-Json -InputObject $chunk -Compress) -ContentType 'application/json' -TimeoutSec 10 -ErrorAction Stop
+                foreach ($x in @($ans)) {
+                    if ($x.status -ne 'success') { continue }
+                    $prov = @($x.isp, $x.org, $x.asname) | Where-Object { $_ } | Select-Object -First 1
+                    $loc  = (@($x.city, $x.regionName, $x.country) | Where-Object { $_ }) -join ', '
+                    if ($prov -and $loc) { $cache[[string]$x.query] = @{ Provider = [string]$prov; Location = $loc }; $changed = $true }
+                }
+            } catch { $script:GeoOffline = $true; break }
+        }
+        # small fallback for anything ip-api could not answer
+        if (-not $script:GeoOffline) {
+            $left = @($need | Where-Object { -not $cache.ContainsKey($_) }) | Select-Object -First 15
+            foreach ($ip in $left) {
+                try {
+                    $x    = Invoke-RestMethod -Uri "https://ipinfo.io/$ip/json" -TimeoutSec 5 -ErrorAction Stop
+                    $prov = ([string]$x.org) -replace '^AS\d+\s+', ''
+                    $loc  = (@($x.city, $x.region, $x.country) | Where-Object { $_ }) -join ', '
+                    if ($prov -and $loc) { $cache[$ip] = @{ Provider = $prov; Location = $loc }; $changed = $true }
+                } catch { }
+            }
+        }
+    }
+    if ($changed) {
+        try {
+            if (-not (Test-Path -LiteralPath $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+            $cache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $GeoCache -Encoding UTF8
+        } catch { }
+    }
+    $out = @{}
+    foreach ($ip in $Ips) {
+        if ($cache.ContainsKey($ip)) { $out[$ip] = $cache[$ip] } else { $out[$ip] = @{ Provider = 'Unavailable'; Location = 'Unavailable' } }
+    }
+    return $out
+}
+
+function Invoke-Tests {
+    Clear-Host
+    Write-Host '====================================='
+    Write-Host '        IP PING STATISTICS'
+    Write-Host '====================================='
+    Write-Host ''
+    Write-Host ('Selected file: ' + (Split-Path -Leaf $script:IpFile))
+    if ($script:BadLines) { Write-Host ("Skipped {0} line(s) that are not valid IPv4 addresses." -f $script:BadLines) -ForegroundColor Yellow }
+    Write-Host ''
+    $script:GeoOffline = $false
+    $script:CurDns = @(Get-CurrentDns)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $stats = @(Measure-Servers $script:Ips)
+    $up = @($stats | Where-Object { $null -ne $_.DnsAvg -or $null -ne $_.IcmpAvg })
+    if ($up.Count) {
+        Write-Host '  Looking up provider / location ...'
+        $geo = Get-GeoInfo @($up | ForEach-Object { $_.Ip })
+        foreach ($r in $up) { $r.Provider = $geo[$r.Ip].Provider; $r.Location = $geo[$r.Ip].Location }
+    }
+    # keep the same order as the IP list file (no sorting)
+    $script:Results = @($up)
+    $script:Elapsed = [Math]::Round($clock.Elapsed.TotalSeconds, 1)
+}
+
+# ---------------- display ----------------
+function Show-Results {
+    $cur = @($script:CurDns)
+    $W = 106
+    $L = New-Object 'System.Collections.Generic.List[string]'
+    $hot = New-Object 'System.Collections.Generic.HashSet[int]'
+    $L.Add('=' * $W)
+    $L.Add('                                  ONLINE DNS SERVER RESULTS')
+    $L.Add('=' * $W)
+    $L.Add(('List   : {0}   ({1} tested, {2} responding, {3}s)' -f (Split-Path -Leaf $script:IpFile), $script:Ips.Count, $script:Results.Count, $script:Elapsed))
+    $L.Add(('Adapter: {0}     Current DNS: {1}' -f $script:Adapter, $(if ($cur.Count) { $cur -join ', ' } else { '(none / automatic)' })))
+    $L.Add('')
+    if (-not $script:Results.Count) {
+        $L.Add('No server answered a ping or a DNS query.')
+    } else {
+        $fmt = '{0,-5}{1,-16}{2,8}{3,8}{4,8}{5,7}  {6,-22} {7}'
+        $hdr = ($fmt -f 'REF', 'IP ADDRESS', 'CONN ms', 'DNS ms', 'PING ms', 'LOSS', 'PROVIDER', 'LOCATION')
+        $n = $script:Results.Count
+        $rowText = New-Object 'System.Collections.Generic.List[string]'
+        $rowCur  = New-Object 'System.Collections.Generic.List[bool]'
+        $ai = -1
+        for ($j = 0; $j -lt $n; $j++) {
+            $r = $script:Results[$j]
+            $isCur = [bool]($cur -contains $r.Ip)
+            if ($isCur -and $ai -lt 0) { $ai = $j }
+            $mark = if ($isCur) { '*' } else { '' }
+            $rowText.Add(($fmt -f ("{0}{1}" -f ($j + 1), $mark), $r.Ip, (Fmt $r.ConnAvg), (Fmt $r.DnsAvg), (Fmt $r.IcmpAvg), ("{0}%" -f $r.Loss), (Fit $r.Provider 22), (Fit $r.Location 30)))
+            $rowCur.Add($isCur)
+        }
+
+        # the complete list, always
+        $L.Add($hdr)
+        $L.Add('-' * $W)
+        for ($j = 0; $j -lt $n; $j++) {
+            if ($rowCur[$j]) { [void]$hot.Add($L.Count) }
+            $L.Add($rowText[$j])
+        }
+
+        # When the list is taller than the window, finish on the active DNS: its rows are repeated at the
+        # very end, so after everything has loaded the screen is sitting on the active DNS (scroll up for the rest).
+        $maxRows = 100000
+        try { $maxRows = [Math]::Max(5, [Console]::WindowHeight - 21) } catch { }
+        if ($n -gt $maxRows -and $ai -ge 0) {
+            $first = [Math]::Max(0, [Math]::Min($ai - [int][Math]::Floor($maxRows / 2), $n - $maxRows))
+            $last  = $first + $maxRows - 1
+            $L.Add('=' * $W)
+            $L.Add(('ACTIVE DNS: REF {0} of {1}   (REF {2}-{3} shown here, the full list is above)' -f ($ai + 1), $n, ($first + 1), ($last + 1)))
+            $L.Add($hdr)
+            $L.Add('-' * $W)
+            for ($j = $first; $j -le $last; $j++) {
+                if ($rowCur[$j]) { [void]$hot.Add($L.Count) }
+                $L.Add($rowText[$j])
+            }
+        }
+        $L.Add('')
+        $L.Add('* = currently set (shown in bright cyan).  CONN ms = TCP connect time to the address that server returned for the test lookup.')
+        $L.Add('DNS ms = answer time for a real DNS query.  PING ms = ICMP echo.  LOSS = % of DNS queries unanswered.')
+    }
+    if ($script:Status) { $L.Add(''); $L.Add($script:Status); $script:Status = '' }
+    Clear-Host
+    # plain lines go out in one block (fast); only the active rows are written separately, in colour
+    $buf = New-Object 'System.Collections.Generic.List[string]'
+    for ($k = 0; $k -lt $L.Count; $k++) {
+        if ($hot.Contains($k)) {
+            if ($buf.Count) { Write-Host ($buf -join "`n"); $buf.Clear() }
+            Write-Host $L[$k] -ForegroundColor Cyan
+        } else { $buf.Add($L[$k]) }
+    }
+    if ($buf.Count) { Write-Host ($buf -join "`n") }
+}
+
+# ---------------- DNS changes (fast: netsh with validate=no, no read-back, no pauses) ----------------
+function Invoke-Netsh([string]$ArgLine) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo -ArgumentList 'netsh.exe', $ArgLine
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $o = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
+    $p.WaitForExit()
+    [pscustomobject]@{ Code = $p.ExitCode; Out = $o.Trim() }
+}
+
+function Set-Dns([string[]]$Servers) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $q = '"' + $script:Adapter + '"'
+    $r = Invoke-Netsh ('interface ipv4 set dnsservers name={0} source=static address={1} register=primary validate=no' -f $q, $Servers[0])
+    for ($i = 1; $i -lt $Servers.Count -and $r.Code -eq 0; $i++) {
+        $r = Invoke-Netsh ('interface ipv4 add dnsservers name={0} address={1} index={2} validate=no' -f $q, $Servers[$i], ($i + 1))
+    }
+    if ($r.Code -ne 0) {
+        try { Set-DnsClientServerAddress -InterfaceAlias $script:Adapter -ServerAddresses $Servers -ErrorAction Stop }
+        catch { $script:Status = 'FAILED to set DNS: ' + $_.Exception.Message + ' ' + $r.Out; return $false }
+    }
+    & ipconfig.exe /flushdns | Out-Null
+    $script:CurDns = @($Servers)
+    $script:Status = ('DNS set: {0}   ({1} ms)' -f ($Servers -join ', '), $clock.ElapsedMilliseconds)
+    return $true
+}
+
+function Reset-Dns {
+    $q = '"' + $script:Adapter + '"'
+    $r = Invoke-Netsh ('interface ipv4 set dnsservers name={0} source=dhcp' -f $q)
+    if ($r.Code -ne 0) {
+        try { Set-DnsClientServerAddress -InterfaceAlias $script:Adapter -ResetServerAddresses -ErrorAction Stop }
+        catch { $script:Status = 'FAILED to restore DNS: ' + $_.Exception.Message + ' ' + $r.Out; return }
+    }
+    & ipconfig.exe /flushdns | Out-Null
+    $script:CurDns = @(Get-CurrentDns)
+    $script:Status = 'DNS restored to automatic (DHCP).'
+}
+
+function Get-Best2 {
+    @($script:Results | Where-Object { $null -ne $_.DnsAvg } | Sort-Object @{ Expression = { $_.Loss } }, @{ Expression = { $_.DnsAvg } } | Select-Object -First 2 | ForEach-Object { $_.Ip })
+}
+
+# Enter / Backspace on an empty prompt = step; quick repeated presses are merged into ONE move.
+function Read-Choice([string]$Prompt) {
+    Write-Host $Prompt -NoNewline
+    $buf = ''
+    while ($true) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -eq 'Enter' -or ($k.Key -eq 'Backspace' -and $buf.Length -eq 0)) {
+            if ($k.Key -eq 'Enter' -and $buf) { Write-Host ''; return $buf }
+            $delta = if ($k.Key -eq 'Enter') { 1 } else { -1 }
+            $until = [DateTime]::UtcNow.AddMilliseconds(100)
+            while ([DateTime]::UtcNow -lt $until) {
+                while ([Console]::KeyAvailable) {
+                    $k2 = [Console]::ReadKey($true)
+                    if ($k2.Key -eq 'Enter') { $delta++ } elseif ($k2.Key -eq 'Backspace') { $delta-- }
+                }
+                [Threading.Thread]::Sleep(5)
+            }
+            Write-Host ''
+            return "STEP:$delta"
+        }
+        elseif ($k.Key -eq 'Escape') { Write-Host ''; return '0' }
+        elseif ($k.Key -eq 'Backspace') {
+            $buf = $buf.Substring(0, $buf.Length - 1)
+            Write-Host "`b `b" -NoNewline
+        }
+        elseif ($k.KeyChar -match '^[0-9 ,]$') { $buf += $k.KeyChar; Write-Host $k.KeyChar -NoNewline }
+        elseif ($k.KeyChar -match '^[bB]$' -and $buf.Length -eq 0) { Write-Host ''; return 'BEST' }
+    }
+}
+
+function Invoke-SetDns {
+    $n = $script:Results.Count
+    if ($n -eq 0) { $script:Status = 'No responding servers to choose from.'; return }
+    while ($true) {
+        Show-Results
+        Write-Host ''
+        Write-Host 'Type a REF number (or two, e.g. "1 3" = primary + secondary).'
+        Write-Host 'Enter = next server | Backspace = previous | B = the 2 fastest | Esc or 0 = back'
+        $choice = Read-Choice 'REF: '
+        if ($choice -eq '0') { return }
+
+        $servers = @()
+        $confirmed = $false
+        if ($choice -like 'STEP:*') {
+            $delta = [int]$choice.Substring(5)
+            if ($delta -eq 0) { continue }
+            $cur = @($script:CurDns)
+            $idx = -1
+            for ($i = 0; $i -lt $n; $i++) { if ($cur.Count -and $script:Results[$i].Ip -eq $cur[0]) { $idx = $i; break } }
+            if ($idx -ge 0) { $start = $idx } elseif ($delta -gt 0) { $start = -1 } else { $start = 0 }
+            $pick = ((($start + $delta) % $n) + $n) % $n
+            $dir  = if ($delta -gt 0) { 1 } else { -1 }
+            # servers that don't answer DNS are skipped unless you type y
+            for ($t = 0; $t -lt $n; $t++) {
+                $r = $script:Results[$pick]
+                if ($null -ne $r.DnsAvg) { $servers = @($r.Ip); break }
+                $yn = Read-Host ('{0} answers ping but not DNS. y = set it anyway, Enter = skip to next' -f $r.Ip)
+                if ($yn -match '^[yY]') { $servers = @($r.Ip); break }
+                $pick = (($pick + $dir) % $n + $n) % $n
+            }
+            $confirmed = $true
+        }
+        elseif ($choice -eq 'BEST') { $servers = Get-Best2 }
+        else {
+            $nums = @($choice -split '[\s,]+' | Where-Object { $_ })
+            $bad  = ($nums.Count -eq 0 -or $nums.Count -gt 2)
+            foreach ($x in $nums) { if ($x -notmatch '^\d+$' -or [int]$x -lt 1 -or [int]$x -gt $n) { $bad = $true } }
+            if ($bad) { $script:Status = 'Invalid reference number.'; continue }
+            $servers = @($nums | ForEach-Object { $script:Results[[int]$_ - 1].Ip } | Select-Object -Unique)
+        }
+
+        if (-not $servers.Count) {
+            if (-not $confirmed) { $script:Status = 'No server answered a DNS query.' }
+            continue
+        }
+
+        $warn = $false
+        foreach ($s in $servers) { foreach ($r in $script:Results) { if ($r.Ip -eq $s -and $null -eq $r.DnsAvg) { $warn = $true } } }
+        if ($warn -and -not $confirmed) {
+            $yn = Read-Host 'A selected server answers ping but did not answer a DNS query. y = set it anyway, Enter = cancel'
+            if ($yn -notmatch '^[yY]') { continue }
+        }
+        [void](Set-Dns $servers)
+    }
+}
+
+# ---------------- main ----------------
+function Main {
+    $script:Adapter = Get-ActiveAdapter
+    $quit = $false
+    while (-not $quit) {
+        $script:IpFile = Select-IpFile
+        if (-not $script:IpFile) { break }
+        Read-IpList $script:IpFile
+        if (-not $script:Ips.Count) {
+            Write-Host ('No valid IPv4 addresses found in ' + (Split-Path -Leaf $script:IpFile)) -ForegroundColor Yellow
+            Wait-Key
+            continue
+        }
+        Invoke-Tests
+        $back = $false
+        while (-not $back -and -not $quit) {
+            Show-Results
+            Write-Host ''
+            Write-Host ('=' * 50)
+            Write-Host '1. Set DNS on this adapter (pick from list)'
+            Write-Host '2. Restore DNS to automatic (DHCP)'
+            Write-Host '3. Refresh results'
+            Write-Host '4. Choose / reload IP list'
+            Write-Host '5. Exit'
+            Write-Host 'B. Set the 2 best servers (primary + secondary)'
+            Write-Host ('=' * 50)
+            $c = (Read-Host 'Select option').Trim()
+            if     ($c -eq '1') { Invoke-SetDns }
+            elseif ($c -eq '2') { Reset-Dns }
+            elseif ($c -eq '3') { Invoke-Tests }
+            elseif ($c -eq '4') { $back = $true }
+            elseif ($c -eq '5' -or $c -match '^[qQ]$') { $quit = $true }
+            elseif ($c -match '^[bB]$') {
+                $best = Get-Best2
+                if ($best.Count) { [void](Set-Dns $best) } else { $script:Status = 'No server answered a DNS query.' }
+            }
+            else { Write-Host 'Invalid option.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+        }
+    }
+}
+
+try { Main }
+catch {
+    Write-Host ''
+    Write-Host ('ERROR: ' + $_.Exception.Message) -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace
+    Read-Host 'Press Enter to close' | Out-Null
+}

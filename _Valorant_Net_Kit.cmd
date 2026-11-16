@@ -86,12 +86,14 @@ $ErrorActionPreference = 'Stop'
 # --- DNS test (used by the optimizer and the list tools) ---
 $TargetName          = 'auth.riotgames.com'  # Riot host name used for the test
 $ManualRiotIp        = ''                    # empty = use the IP each DNS server returns. Or type one IPv4 here, for example '1.2.3.4', to test that IP instead
-$TimeoutMs           = 1200                  # how long to wait for each DNS server
+$TimeoutMs           = 1500                  # how long to wait for each DNS server
 $DnsPort             = 53
 $ConnectPort         = 443                   # port used to time the connection to the Riot IP each DNS returns
-$ConnectTimeoutMs    = 1200                  # how long to wait for that connection
+$ConnectTimeoutMs    = 1500                  # how long to wait for that connection
 $ConnectSamples      = 2                     # connection attempts per Riot IP (the fastest one counts)
 $RankBy              = 'conn'                # 'conn' = lowest connection time wins (lookup time only breaks ties); 'total' = lookup + connection
+$CountrySort         = $true                 # $true = rank servers by country first (order below), then by $RankBy inside each country; $false = ignore country
+$CountryOrder        = @('India','China','Thailand','France')   # country priority, first = best; every other country comes after these (ranked by $RankBy among themselves)
 $SwitchMarginMs      = 2                     # servers within this many ms of the best count as equal (the faster lookup wins); your current DNS stays if it is that close (0 = strict)
 $AdapterName         = ''                    # empty = use the connection Windows is using now (Wi-Fi or Ethernet)
 $MaxThreads          = 16                    # how many DNS servers are tested at the same time (1 = one by one, like before)
@@ -1797,6 +1799,90 @@ function Invoke-ParallelWork {
     return [pscustomobject]@{ Results = $results; Finished = $finished; Stopped = $stopped }
 }
 
+# ---- country ranking ($CountrySort / $CountryOrder) ----
+$script:CountryMiss = @{}
+
+function ConvertTo-CountryName {
+    param([string]$Text)
+
+    $t = ([string]$Text).Trim()
+
+    switch -Regex ($t) {
+        '^(IN|IND)$'  { return 'India' }
+        '^(CN|CHN)$'  { return 'China' }
+        '^(TH|THA)$'  { return 'Thailand' }
+        '^(FR|FRA)$'  { return 'France' }
+        default       { return $t }
+    }
+}
+
+# The cached location text looks like "Mumbai, India" (city/region first, country last).
+function Get-InfoCountry {
+    param($Info)
+
+    if ($null -eq $Info -or [string]::IsNullOrWhiteSpace([string]$Info.Location)) {
+        return ''
+    }
+
+    $parts = @(([string]$Info.Location) -split ',')
+    return (ConvertTo-CountryName -Text $parts[$parts.Count - 1])
+}
+
+# Adds Country and CountryRank (0 = first in $CountryOrder, ... , count = every other country) to the rows.
+function Add-CountryRank {
+    param($Rows)
+
+    $order = @($CountryOrder | ForEach-Object { (ConvertTo-CountryName -Text ([string]$_)).ToLower() })
+    $otherRank = $order.Count
+    $now = [DateTime]::UtcNow
+
+    # Servers whose location could not be found are not asked again for 10 minutes (keeps the rounds fast).
+    $lookup = @(
+        $Rows | Where-Object { $_.Success } | ForEach-Object { [string]$_.IP } |
+        Where-Object { -not ($script:CountryMiss.ContainsKey($_) -and ($now - $script:CountryMiss[$_]).TotalMinutes -lt 10) }
+    )
+
+    $need = @($lookup | Where-Object { -not $script:IpInfoCache.ContainsKey($_) })
+    $info = @{}
+
+    if ($lookup.Count -gt 0) {
+        try {
+            $info = Get-IpInfo -Ips $lookup
+        }
+        catch {
+            $info = @{}
+        }
+
+        if ($null -eq $info) {
+            $info = @{}
+        }
+    }
+
+    foreach ($ip in $need) {
+        if (-not $info.ContainsKey($ip)) {
+            $script:CountryMiss[$ip] = $now
+        }
+    }
+
+    foreach ($row in $Rows) {
+        $country = ''
+
+        if ($info.ContainsKey([string]$row.IP)) {
+            $country = Get-InfoCountry -Info $info[[string]$row.IP]
+        }
+
+        $rank = $otherRank
+        $idx = [array]::IndexOf($order, $country.ToLower())
+
+        if ($idx -ge 0) {
+            $rank = $idx
+        }
+
+        Add-Member -InputObject $row -NotePropertyName Country -NotePropertyValue $country -Force
+        Add-Member -InputObject $row -NotePropertyName CountryRank -NotePropertyValue $rank -Force
+    }
+}
+
 # Test every server once (lookup, then a connection to the Riot IP it returned) and rank them.
 # The servers are tested in parallel ($MaxThreads at a time); the ranking is the same as before.
 function Get-DnsRound {
@@ -1954,11 +2040,23 @@ function Get-DnsRound {
 
     $rows = @($cachedRows) + @($rows)
 
-    # Passed servers first, ordered by the ranking value ($RankBy); lookup time breaks ties.
+    # Country of each passed server (used for the country-first order).
+    if ($CountrySort) {
+        Add-CountryRank -Rows $rows
+    }
+    else {
+        foreach ($row in $rows) {
+            Add-Member -InputObject $row -NotePropertyName Country -NotePropertyValue '' -Force
+            Add-Member -InputObject $row -NotePropertyName CountryRank -NotePropertyValue 0 -Force
+        }
+    }
+
+    # Passed servers first, then by country ($CountryOrder), then by the ranking value ($RankBy); lookup time breaks ties.
     $sorted = @(
         $rows |
         Sort-Object `
             @{Expression = { if ($_.Success) { 0 } else { 1 } }}, `
+            @{Expression = { if ($_.Success) { $_.CountryRank } else { 0 } }}, `
             @{Expression = { if ($_.Success) { $_.Score } else { $_.DnsMs } }}, `
             DnsMs, `
             IP
@@ -1973,9 +2071,11 @@ function Get-DnsRound {
 
     if ($ranked.Count -gt 0) {
         $bestScore = $ranked[0].Score
+        $bestCountryRank = $ranked[0].CountryRank
 
+        # Only servers of the best available country group can win.
         $winner = $ranked |
-            Where-Object { $_.Score -le ($bestScore + $SwitchMarginMs) } |
+            Where-Object { $_.CountryRank -eq $bestCountryRank -and $_.Score -le ($bestScore + $SwitchMarginMs) } |
             Sort-Object DnsMs, Score, IP |
             Select-Object -First 1
     }
@@ -2011,8 +2111,8 @@ function Write-DnsTable {
         $shown = @($shown) + $Winner
     }
 
-    Write-Host ('{0,-16} {1,8} {2,9} {3,9}  {4,-15}  {5}' -f 'DNS SERVER', 'DNS ms', 'CONN ms', 'TOTAL ms', 'RIOT IP', 'RESULT')
-    Write-Host ('-' * 78)
+    Write-Host ('{0,-16} {1,8} {2,9} {3,9}  {4,-15}  {5,-10} {6}' -f 'DNS SERVER', 'DNS ms', 'CONN ms', 'TOTAL ms', 'RIOT IP', 'COUNTRY', 'RESULT')
+    Write-Host ('-' * 90)
 
     foreach ($row in $shown) {
         if ($row.Success) {
@@ -2023,14 +2123,14 @@ function Write-DnsTable {
             }
 
             Write-Host (
-                '{0,-16} {1,8:N1} {2,9:N1} {3,9:N1}  {4,-15}  {5}' -f
-                $row.IP, $row.DnsMs, $row.ConnMs, $row.TotalMs, $row.RiotIP, $okText
+                '{0,-16} {1,8:N1} {2,9:N1} {3,9:N1}  {4,-15}  {5,-10} {6}' -f
+                $row.IP, $row.DnsMs, $row.ConnMs, $row.TotalMs, $row.RiotIP, (Format-Cell -Text $row.Country -Width 10), $okText
             ) -ForegroundColor Green
         }
         else {
             Write-Host (
-                '{0,-16} {1,8:N1} {2,9} {3,9}  {4,-15}  {5}' -f
-                $row.IP, $row.DnsMs, '-', '-', $row.RiotIP, $row.Status
+                '{0,-16} {1,8:N1} {2,9} {3,9}  {4,-15}  {5,-10} {6}' -f
+                $row.IP, $row.DnsMs, '-', '-', $row.RiotIP, '-', $row.Status
             ) -ForegroundColor DarkGray
         }
     }
@@ -2095,6 +2195,10 @@ function Invoke-AutoOptimizer {
     }
     else {
         Write-Host 'Ranking  : lowest connection time wins (lookup time only breaks ties)'
+    }
+
+    if ($CountrySort) {
+        Write-Host ('Country  : {0}, then all other countries (best country available wins first; speed decides inside a country)' -f (@($CountryOrder) -join ', '))
     }
 
     Write-Host "Margin   : $SwitchMarginMs ms - servers this close to the best count as equal (faster lookup wins), and your current DNS stays if it is that close"
@@ -2228,7 +2332,7 @@ function Invoke-AutoOptimizer {
 
                     $failover = ($currentFailRounds -ge $FailoverRounds)
 
-                    if (-not $failover -and $null -ne $currentRow -and ($currentRow.Score - $bestScore) -le $SwitchMarginMs) {
+                    if (-not $failover -and $null -ne $currentRow -and $currentRow.CountryRank -eq $winner.CountryRank -and ($currentRow.Score - $bestScore) -le $SwitchMarginMs) {
                         if ($currentRow.IP -eq $winner.IP) {
                             Write-Host (
                                 'Best: {0} ({1} {2:N1} ms) - already the main DNS.' -f

@@ -1,7 +1,6 @@
 @echo off
-if /i "%~1"=="--connection-monitor" goto :CM_ENTRY
 setlocal EnableExtensions EnableDelayedExpansion
-title DNS Scraper, Ping Tester and Automatic DNS Failover Manager
+title DNS Scraper, Ping Tester and DNS Manager
 color 0A
 
 REM ===== SETTINGS =====
@@ -14,15 +13,23 @@ set "PING_INPUT=%TEMP%\dns_ping_input_%RANDOM%_%RANDOM%.txt"
 set "PING_OUTPUT=%TEMP%\dns_ping_output_%RANDOM%_%RANDOM%.txt"
 set "INFO_INPUT=%TEMP%\dns_info_input_%RANDOM%_%RANDOM%.txt"
 set "INFO_OUTPUT=%TEMP%\dns_info_output_%RANDOM%_%RANDOM%.txt"
-set "CONNECTION_MONITOR_PIDFILE=%TEMP%\dns_connection_monitor_%RANDOM%_%RANDOM%.pid"
-set "DNS_MONITOR_STATUS_FILE=%TEMP%\dns_connection_status_%RANDOM%_%RANDOM%.txt"
 set "DNS_NAV_FILE=%TEMP%\dns_navigation_%RANDOM%_%RANDOM%.txt"
-set "MONITOR_VISIBLE=0"
+set "DNS_INFO_FILE=%TEMP%\dns_info_%RANDOM%_%RANDOM%.txt"
+set "DNS_LISTENER_ERR=%TEMP%\dns_listener_err_%RANDOM%_%RANDOM%.txt"
+rem Saved provider/location per DNS IP. A name that was fetched once is kept and reused when the lookup is unavailable.
+set "DNS_PROV_CACHE=%LOCALAPPDATA%\dns_manager_provider_cache.txt"
 set "PING_SCRIPT=%TEMP%\dns_ping_parallel_%RANDOM%_%RANDOM%.ps1"
-set "PING_THREADS=128"
+set "PING_THREADS=64"
 set "PING_COUNT=4"
 set "PING_TIMEOUT_MS=800"
 set "PING_PROBE_TIMEOUT_MS=1200"
+rem CONN ms / DNS ms columns: each server is asked to resolve this name (DNS ms), then a TCP connection is opened
+rem to the address it returned (CONN ms).
+set "DNS_TEST_ENDPOINT=glz-ap-1.ap.a.pvp.net"
+set "DNS_TEST_TCP_PORT=443"
+set "DNS_TEST_TCP_TIMEOUT_MS=1500"
+rem Time one DNS server gets to answer the test lookup (UDP). Servers that do not answer in time show no CONN ms and are hidden.
+set "DNS_TEST_DNS_TIMEOUT_MS=1200"
 set "URL="
 
 where powershell.exe >nul 2>&1
@@ -31,6 +38,10 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+rem ESC character used to colour the active DNS row (Windows 10 or newer). If it cannot be read, rows are just not coloured.
+set "ESC="
+for /f %%E in ('echo prompt $E ^| cmd') do set "ESC=%%E"
+if defined ESC if not "!ESC:~1,1!"=="" set "ESC="
 
 :START
 cls
@@ -106,7 +117,7 @@ echo.
 REM Pass URL as an environment variable to avoid PowerShell quoting issues.
 set "DNS_SCRAPE_URL=!URL!"
 set "DNS_SCRAPE_OUT=!OUT!"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAnAFMAdABvAHAAJwAKAHQAcgB5ACAAewAKACAAIAAgACAAJAB1ACAAPQAgACQAZQBuAHYAOgBEAE4AUwBfAFMAQwBSAEEAUABFAF8AVQBSAEwACgAgACAAIAAgACQAZABlAHMAdAAgAD0AIAAkAGUAbgB2ADoARABOAFMAXwBTAEMAUgBBAFAARQBfAE8AVQBUAAoAIAAgACAAIAAkAHIAIAA9ACAASQBuAHYAbwBrAGUALQBXAGUAYgBSAGUAcQB1AGUAcwB0ACAALQBVAHIAaQAgACQAdQAgAC0AVABpAG0AZQBvAHUAdABTAGUAYwAgADMAMAAgAC0AVQBzAGUAQgBhAHMAaQBjAFAAYQByAHMAaQBuAGcACgAgACAAIAAgACQAbQBhAHQAYwBoAGUAcwAgAD0AIABbAHIAZQBnAGUAeABdADoAOgBNAGEAdABjAGgAZQBzACgAWwBzAHQAcgBpAG4AZwBdACQAcgAuAEMAbwBuAHQAZQBuAHQALAAgACcAKAA/ADwAIQBbADAALQA5AC4AXQApACgAPwA6AFsAMAAtADkAXQB7ADEALAAzAH0AXAAuACkAewAzAH0AWwAwAC0AOQBdAHsAMQAsADMAfQAoAD8AIQBbADAALQA5AC4AXQApACcAKQAKACAAIAAgACAAJABpAHAAcwAgAD0AIABAACgACgAgACAAIAAgACAAIAAgACAAZgBvAHIAZQBhAGMAaAAgACgAJABtACAAaQBuACAAJABtAGEAdABjAGgAZQBzACkAIAB7AAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAJABpAHAAIAA9ACAAJABtAC4AVgBhAGwAdQBlAAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAJABvAGMAdABlAHQAcwAgAD0AIAAkAGkAcAAuAFMAcABsAGkAdAAoACcALgAnACkACgAgACAAIAAgACAAIAAgACAAIAAgACAAIABpAGYAIAAoACgAJABvAGMAdABlAHQAcwAgAHwAIABXAGgAZQByAGUALQBPAGIAagBlAGMAdAAgAHsAIAAkAF8AIAAtAG4AbwB0AG0AYQB0AGMAaAAgACcAXgBcAGQAewAxACwAMwB9ACQAJwAgAC0AbwByACAAWwBpAG4AdABdACQAXwAgAC0AZwB0ACAAMgA1ADUAIAB9ACkALgBDAG8AdQBuAHQAIAAtAGUAcQAgADAAKQAgAHsAIAAkAGkAcAAgAH0ACgAgACAAIAAgACAAIAAgACAAfQAKACAAIAAgACAAKQAKACAAIAAgACAAJABpAHAAcwAgAD0AIABAACgAJABpAHAAcwAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAIAAgACAAIABpAGYAIAAoACQAaQBwAHMALgBDAG8AdQBuAHQAIAAtAGUAcQAgADAAKQAgAHsAIAB0AGgAcgBvAHcAIAAnAE4AbwAgAHYAYQBsAGkAZAAgAEkAUAB2ADQAIABhAGQAZAByAGUAcwBzAGUAcwAgAGYAbwB1AG4AZAAgAG8AbgAgAHQAaABlACAAcABhAGcAZQAuACcAIAB9AAoAIAAgACAAIABbAFMAeQBzAHQAZQBtAC4ASQBPAC4ARgBpAGwAZQBdADoAOgBXAHIAaQB0AGUAQQBsAGwATABpAG4AZQBzACgAJABkAGUAcwB0ACwAIABbAHMAdAByAGkAbgBnAFsAXQBdACQAaQBwAHMALAAgAFsAUwB5AHMAdABlAG0ALgBUAGUAeAB0AC4ARQBuAGMAbwBkAGkAbgBnAF0AOgA6AEEAUwBDAEkASQApAAoAIAAgACAAIABXAHIAaQB0AGUALQBIAG8AcwB0ACAAKAAiAFMAYwByAGEAcABlACAAcwB1AGMAYwBlAHMAcwBmAHUAbAA6ACAAewAwAH0AIAB1AG4AaQBxAHUAZQAgAEkAUAB2ADQAIABhAGQAZAByAGUAcwBzACgAZQBzACkAIABzAGEAdgBlAGQALgAiACAALQBmACAAJABpAHAAcwAuAEMAbwB1AG4AdAApAAoAIAAgACAAIAAkAGkAcABzACAAfAAgAFMAZQBsAGUAYwB0AC0ATwBiAGoAZQBjAHQAIAAtAEYAaQByAHMAdAAgADQAMAAgAHwAIABGAG8AcgBFAGEAYwBoAC0ATwBiAGoAZQBjAHQAIAB7ACAAVwByAGkAdABlAC0ASABvAHMAdAAgACgAIgAgACAAewAwAH0AIgAgAC0AZgAgACQAXwApACAAfQAKAH0ACgBjAGEAdABjAGgAIAB7AAoAIAAgACAAIABXAHIAaQB0AGUALQBIAG8AcwB0ACAAKAAiAFMAYwByAGEAcABlACAAZgBhAGkAbABlAGQAOgAgAHsAMAB9ACIAIAAtAGYAIAAkAF8ALgBFAHgAYwBlAHAAdABpAG8AbgAuAE0AZQBzAHMAYQBnAGUAKQAgAC0ARgBvAHIAZQBnAHIAbwB1AG4AZABDAG8AbABvAHIAIABSAGUAZAAKACAAIAAgACAAZQB4AGkAdAAgADEACgB9AA==
+powershell.exe -NoProfile -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAnAFMAdABvAHAAJwAKAGYAdQBuAGMAdABpAG8AbgAgAFQAZQBzAHQALQBJAHAAKABbAHMAdAByAGkAbgBnAF0AJABzACkAIAB7AAoAIAAgACAAIAAkAG8AIAA9ACAAJABzAC4AUwBwAGwAaQB0ACgAJwAuACcAKQAKACAAIAAgACAAaQBmACAAKAAkAG8ALgBDAG8AdQBuAHQAIAAtAG4AZQAgADQAKQAgAHsAIAByAGUAdAB1AHIAbgAgACQAZgBhAGwAcwBlACAAfQAKACAAIAAgACAAJABuACAAPQAgAEAAKAApAAoAIAAgACAAIABmAG8AcgBlAGEAYwBoACAAKAAkAHAAIABpAG4AIAAkAG8AKQAgAHsACgAgACAAIAAgACAAIAAgACAAaQBmACAAKAAkAHAAIAAtAG4AbwB0AG0AYQB0AGMAaAAgACcAXgBcAGQAewAxACwAMwB9ACQAJwAgAC0AbwByACAAWwBpAG4AdABdACQAcAAgAC0AZwB0ACAAMgA1ADUAKQAgAHsAIAByAGUAdAB1AHIAbgAgACQAZgBhAGwAcwBlACAAfQAKACAAIAAgACAAIAAgACAAIAAkAG4AIAArAD0AIABbAGkAbgB0AF0AJABwAAoAIAAgACAAIAB9AAoAIAAgACAAIAByAGUAdAB1AHIAbgAgACgAJABuAFsAMABdACAALQBuAGUAIAAwACAALQBhAG4AZAAgACQAbgBbADAAXQAgAC0AbgBlACAAMQAyADcAIAAtAGEAbgBkACAAJABuAFsAMABdACAALQBsAHQAIAAyADIANAAgAC0AYQBuAGQAIAAtAG4AbwB0ACAAKAAkAG4AWwAwAF0AIAAtAGUAcQAgADEANgA5ACAALQBhAG4AZAAgACQAbgBbADEAXQAgAC0AZQBxACAAMgA1ADQAKQApAAoAfQAKAHQAcgB5ACAAewAKACAAIAAgACAAWwBOAGUAdAAuAFMAZQByAHYAaQBjAGUAUABvAGkAbgB0AE0AYQBuAGEAZwBlAHIAXQA6ADoAUwBlAGMAdQByAGkAdAB5AFAAcgBvAHQAbwBjAG8AbAAgAD0AIABbAE4AZQB0AC4AUwBlAHIAdgBpAGMAZQBQAG8AaQBuAHQATQBhAG4AYQBnAGUAcgBdADoAOgBTAGUAYwB1AHIAaQB0AHkAUAByAG8AdABvAGMAbwBsACAALQBiAG8AcgAgAFsATgBlAHQALgBTAGUAYwB1AHIAaQB0AHkAUAByAG8AdABvAGMAbwBsAFQAeQBwAGUAXQA6ADoAVABsAHMAMQAyAAoAIAAgACAAIAAkAHMAdABhAHIAdAAgAD0AIABbAFUAcgBpAF0AJABlAG4AdgA6AEQATgBTAF8AUwBDAFIAQQBQAEUAXwBVAFIATAAKACAAIAAgACAAaQBmACAAKAAkAHMAdABhAHIAdAAuAFMAYwBoAGUAbQBlACAALQBuAGUAIAAnAGgAdAB0AHAAJwAgAC0AYQBuAGQAIAAkAHMAdABhAHIAdAAuAFMAYwBoAGUAbQBlACAALQBuAGUAIAAnAGgAdAB0AHAAcwAnACkAIAB7ACAAdABoAHIAbwB3ACAAJwBPAG4AbAB5ACAAaAB0AHQAcAAgAGEAbgBkACAAaAB0AHQAcABzACAAYQBkAGQAcgBlAHMAcwBlAHMAIABhAHIAZQAgAGEAbABsAG8AdwBlAGQALgAnACAAfQAKACAAIAAgACAAJABiAGEAcwBlACAAPQAgAFsAcgBlAGcAZQB4AF0AOgA6AEUAcwBjAGEAcABlACgAKAAkAHMAdABhAHIAdAAuAEEAYgBzAG8AbAB1AHQAZQBQAGEAdABoACAALQByAGUAcABsAGEAYwBlACAAJwBcAC4AWwBBAC0AWgBhAC0AegAwAC0AOQBdACsAJAAnACwAIAAnACcAKQApAAoAIAAgACAAIAAkAHAAYQBnAGUAZAAgAD0AIAAnACgAPwBpACkAXgAnACAAKwAgACQAYgBhAHMAZQAgACsAIAAnAFsALQBfAC8AXQA/ACgAcABhAGcAZQBbAC0AXwAvAF0APwApAD8AXABkACsAKABcAC4AWwBBAC0AWgBhAC0AegAwAC0AOQBdACsAKQA/AC8APwAkACcACgAgACAAIAAgACQAbABpAG4AawAgAD0AIAAnACgAPwBpACkAaAByAGUAZgBcAHMAKgA9AFwAcwAqAFsAIgAnACcAXQAoAFsAXgAiACcAJwA8AD4AXABzACMAXQArACkAJwAKACAAIAAgACAAJABpAHAAcgBlACAAPQAgACcAKAA/ADwAIQBbADAALQA5AC4AXQApACgAPwA6AFsAMAAtADkAXQB7ADEALAAzAH0AXAAuACkAewAzAH0AWwAwAC0AOQBdAHsAMQAsADMAfQAoAD8AIQBbADAALQA5AC4AXQApACcACgAgACAAIAAgACQAcwBlAGUAbgAgAD0AIABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAJwBTAHkAcwB0AGUAbQAuAEMAbwBsAGwAZQBjAHQAaQBvAG4AcwAuAEcAZQBuAGUAcgBpAGMALgBIAGEAcwBoAFMAZQB0AFsAcwB0AHIAaQBuAGcAXQAnAAoAIAAgACAAIAAkAGYAbwB1AG4AZAAgAD0AIABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAJwBTAHkAcwB0AGUAbQAuAEMAbwBsAGwAZQBjAHQAaQBvAG4AcwAuAEcAZQBuAGUAcgBpAGMALgBIAGEAcwBoAFMAZQB0AFsAcwB0AHIAaQBuAGcAXQAnAAoAIAAgACAAIAAkAGkAcABzACAAPQAgAE4AZQB3AC0ATwBiAGoAZQBjAHQAIAAnAFMAeQBzAHQAZQBtAC4AQwBvAGwAbABlAGMAdABpAG8AbgBzAC4ARwBlAG4AZQByAGkAYwAuAEwAaQBzAHQAWwBzAHQAcgBpAG4AZwBdACcACgAgACAAIAAgACQAdABvAGQAbwAgAD0AIABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAJwBTAHkAcwB0AGUAbQAuAEMAbwBsAGwAZQBjAHQAaQBvAG4AcwAuAEcAZQBuAGUAcgBpAGMALgBRAHUAZQB1AGUAWwBzAHQAcgBpAG4AZwBdACcACgAgACAAIAAgAFsAdgBvAGkAZABdACQAcwBlAGUAbgAuAEEAZABkACgAJABzAHQAYQByAHQALgBBAGIAcwBvAGwAdQB0AGUAVQByAGkAKQAKACAAIAAgACAAJAB0AG8AZABvAC4ARQBuAHEAdQBlAHUAZQAoACQAcwB0AGEAcgB0AC4AQQBiAHMAbwBsAHUAdABlAFUAcgBpACkACgAgACAAIAAgACQAcABhAGcAZQBzACAAPQAgADAACgAgACAAIAAgAHcAaABpAGwAZQAgACgAJAB0AG8AZABvAC4AQwBvAHUAbgB0ACAALQBnAHQAIAAwACAALQBhAG4AZAAgACQAcABhAGcAZQBzACAALQBsAHQAIAAzADAAKQAgAHsACgAgACAAIAAgACAAIAAgACAAaQBmACAAKAAkAHAAYQBnAGUAcwAgAC0AZwB0ACAAMAApACAAewAgAFMAdABhAHIAdAAtAFMAbABlAGUAcAAgAC0ATQBpAGwAbABpAHMAZQBjAG8AbgBkAHMAIAAyADUAMAAgAH0ACgAgACAAIAAgACAAIAAgACAAJAB1AHIAbAAgAD0AIAAkAHQAbwBkAG8ALgBEAGUAcQB1AGUAdQBlACgAKQAKACAAIAAgACAAIAAgACAAIAB0AHIAeQAgAHsAIAAkAHIAIAA9ACAASQBuAHYAbwBrAGUALQBXAGUAYgBSAGUAcQB1AGUAcwB0ACAALQBVAHIAaQAgACQAdQByAGwAIAAtAFQAaQBtAGUAbwB1AHQAUwBlAGMAIAAzADAAIAAtAFUAcwBlAEIAYQBzAGkAYwBQAGEAcgBzAGkAbgBnACAALQBNAGEAeABpAG0AdQBtAFIAZQBkAGkAcgBlAGMAdABpAG8AbgAgADMAIAB9AAoAIAAgACAAIAAgACAAIAAgAGMAYQB0AGMAaAAgAHsAIABpAGYAIAAoACQAcABhAGcAZQBzACAALQBlAHEAIAAwACkAIAB7ACAAdABoAHIAbwB3ACAAfQA7ACAAYwBvAG4AdABpAG4AdQBlACAAfQAKACAAIAAgACAAIAAgACAAIAAkAHAAYQBnAGUAcwArACsACgAgACAAIAAgACAAIAAgACAAJABoAHQAbQBsACAAPQAgAFsAcwB0AHIAaQBuAGcAXQAkAHIALgBDAG8AbgB0AGUAbgB0AAoAIAAgACAAIAAgACAAIAAgAGYAbwByAGUAYQBjAGgAIAAoACQAbQAgAGkAbgAgAFsAcgBlAGcAZQB4AF0AOgA6AE0AYQB0AGMAaABlAHMAKAAkAGgAdABtAGwALAAgACQAaQBwAHIAZQApACkAIAB7AAoAIAAgACAAIAAgACAAIAAgACAAIAAgACAAaQBmACAAKAAoAFQAZQBzAHQALQBJAHAAIAAkAG0ALgBWAGEAbAB1AGUAKQAgAC0AYQBuAGQAIAAkAGYAbwB1AG4AZAAuAEEAZABkACgAJABtAC4AVgBhAGwAdQBlACkAKQAgAHsAIAAkAGkAcABzAC4AQQBkAGQAKAAkAG0ALgBWAGEAbAB1AGUAKQAgAH0ACgAgACAAIAAgACAAIAAgACAAfQAKACAAIAAgACAAIAAgACAAIABmAG8AcgBlAGEAYwBoACAAKAAkAGgAIABpAG4AIABbAHIAZQBnAGUAeABdADoAOgBNAGEAdABjAGgAZQBzACgAJABoAHQAbQBsACwAIAAkAGwAaQBuAGsAKQApACAAewAKACAAIAAgACAAIAAgACAAIAAgACAAIAAgAHQAcgB5ACAAewAgACQAYQAgAD0AIABbAFUAcgBpAF0AOgA6AG4AZQB3ACgAJABzAHQAYQByAHQALAAgACQAaAAuAEcAcgBvAHUAcABzAFsAMQBdAC4AVgBhAGwAdQBlACkAIAB9ACAAYwBhAHQAYwBoACAAewAgAGMAbwBuAHQAaQBuAHUAZQAgAH0ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIABpAGYAIAAoACQAYQAuAEgAbwBzAHQAIAAtAG4AZQAgACQAcwB0AGEAcgB0AC4ASABvAHMAdAAgAC0AbwByACAAKAAkAGEALgBTAGMAaABlAG0AZQAgAC0AbgBlACAAJwBoAHQAdABwACcAIAAtAGEAbgBkACAAJABhAC4AUwBjAGgAZQBtAGUAIAAtAG4AZQAgACcAaAB0AHQAcABzACcAKQApACAAewAgAGMAbwBuAHQAaQBuAHUAZQAgAH0ACgAgACAAIAAgACAAIAAgACAAIAAgACAAIAAkAGkAcwBQAGEAZwBlACAAPQAgACgAJABhAC4AQQBiAHMAbwBsAHUAdABlAFAAYQB0AGgAIAAtAG0AYQB0AGMAaAAgACQAcABhAGcAZQBkACkAIAAtAG8AcgAgACgAJABhAC4AQQBiAHMAbwBsAHUAdABlAFAAYQB0AGgAIAAtAGUAcQAgACQAcwB0AGEAcgB0AC4AQQBiAHMAbwBsAHUAdABlAFAAYQB0AGgAIAAtAGEAbgBkACAAJABhAC4AUQB1AGUAcgB5ACAALQBtAGEAdABjAGgAIAAnACgAPwBpACkAWwA/ACYAXQAoAHAAYQBnAGUAfABwAHwAcABnACkAPQBcAGQAKwAnACkACgAgACAAIAAgACAAIAAgACAAIAAgACAAIABpAGYAIAAoACQAaQBzAFAAYQBnAGUAIAAtAGEAbgBkACAAJABzAGUAZQBuAC4AQwBvAHUAbgB0ACAALQBsAHQAIAA2ADAAIAAtAGEAbgBkACAAJABzAGUAZQBuAC4AQQBkAGQAKAAkAGEALgBBAGIAcwBvAGwAdQB0AGUAVQByAGkAKQApACAAewAgACQAdABvAGQAbwAuAEUAbgBxAHUAZQB1AGUAKAAkAGEALgBBAGIAcwBvAGwAdQB0AGUAVQByAGkAKQAgAH0ACgAgACAAIAAgACAAIAAgACAAfQAKACAAIAAgACAAfQAKACAAIAAgACAAaQBmACAAKAAkAGkAcABzAC4AQwBvAHUAbgB0ACAALQBlAHEAIAAwACkAIAB7ACAAdABoAHIAbwB3ACAAJwBOAG8AIAB2AGEAbABpAGQAIABJAFAAdgA0ACAAYQBkAGQAcgBlAHMAcwBlAHMAIABmAG8AdQBuAGQAIABvAG4AIAB0AGgAZQAgAHAAYQBnAGUALgAnACAAfQAKACAAIAAgACAAWwBTAHkAcwB0AGUAbQAuAEkATwAuAEYAaQBsAGUAXQA6ADoAVwByAGkAdABlAEEAbABsAEwAaQBuAGUAcwAoACQAZQBuAHYAOgBEAE4AUwBfAFMAQwBSAEEAUABFAF8ATwBVAFQALAAgAFsAcwB0AHIAaQBuAGcAWwBdAF0AJABpAHAAcwAsACAAWwBTAHkAcwB0AGUAbQAuAFQAZQB4AHQALgBFAG4AYwBvAGQAaQBuAGcAXQA6ADoAQQBTAEMASQBJACkACgAgACAAIAAgAFcAcgBpAHQAZQAtAEgAbwBzAHQAIAAoACIAUwBjAHIAYQBwAGUAIABzAHUAYwBjAGUAcwBzAGYAdQBsADoAIAB7ADAAfQAgAHUAbgBpAHEAdQBlACAASQBQAHYANAAgAGEAZABkAHIAZQBzAHMAKABlAHMAKQAgAGYAcgBvAG0AIAB7ADEAfQAgAHAAYQBnAGUAKABzACkAIABzAGEAdgBlAGQALgAiACAALQBmACAAJABpAHAAcwAuAEMAbwB1AG4AdAAsACAAJABwAGEAZwBlAHMAKQAKACAAIAAgACAAJABpAHAAcwAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBGAGkAcgBzAHQAIAA0ADAAIAB8ACAARgBvAHIARQBhAGMAaAAtAE8AYgBqAGUAYwB0ACAAewAgAFcAcgBpAHQAZQAtAEgAbwBzAHQAIAAoACIAIAAgAHsAMAB9ACIAIAAtAGYAIAAkAF8AKQAgAH0ACgB9AAoAYwBhAHQAYwBoACAAewAKACAAIAAgACAAVwByAGkAdABlAC0ASABvAHMAdAAgACgAIgBTAGMAcgBhAHAAZQAgAGYAYQBpAGwAZQBkADoAIAB7ADAAfQAiACAALQBmACAAJABfAC4ARQB4AGMAZQBwAHQAaQBvAG4ALgBNAGUAcwBzAGEAZwBlACkAIAAtAEYAbwByAGUAZwByAG8AdQBuAGQAQwBvAGwAbwByACAAUgBlAGQACgAgACAAIAAgAGUAeABpAHQAIAAxAAoAfQAKAA==
 if errorlevel 1 (
     echo.
     echo Scraping failed. Check the URL and internet connection.
@@ -147,22 +158,7 @@ echo       TESTING SCRAPED DNS IP ADDRESSES
 echo ============================================================
 echo IP list: !OUT!
 echo.
-echo Optional average-ping filter:
-echo - Enter a maximum average ping in milliseconds (for example 50).
-echo - Press ENTER to skip the limit and keep all ping-responsive IPs.
-:ASKPINGLIMIT
-set "PINGLIMIT="
-set /p "PINGLIMIT=Maximum average ping in ms (ENTER = no limit): "
-if not defined PINGLIMIT (
-    echo No average-ping limit selected. All ping-responsive IPs with readable ping results will be kept.
-) else (
-    echo(!PINGLIMIT!| findstr /r "^[0-9][0-9]*$" >nul
-    if errorlevel 1 (
-        echo Please enter a whole number, or press ENTER to skip the limit.
-        goto ASKPINGLIMIT
-    )
-    echo Only IPs with average ping below !PINGLIMIT! ms will be shown.
-)
+echo Filter: only DNS servers with a readable CONN ms are kept (ping may fail).
 echo.
 set /a ONLINE=0
 rem Write the IP list and extract the embedded runspace-pool tester.
@@ -187,7 +183,9 @@ set "DNS_PING_THREADS=!PING_THREADS!"
 echo Testing !COUNT! DNS servers concurrently with !PING_THREADS! worker threads...
 echo.
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "!PING_SCRIPT!"
-if errorlevel 1 (
+set "PTRC=!errorlevel!"
+del "!PING_SCRIPT!" >nul 2>&1
+if not "!PTRC!"=="0" (
     echo.
     echo The parallel ping test failed to run.
     pause
@@ -199,30 +197,33 @@ if not exist "!PING_OUTPUT!" (
     pause
     goto START
 )
-for /f "usebackq tokens=1-6 delims=|" %%A in ("!PING_OUTPUT!") do (
+for /f "usebackq tokens=1-9 delims=|" %%A in ("!PING_OUTPUT!") do (
     set "RIP=%%A"
     set "RCOUNT=%%B"
-    set "RMIN=%%C"
-    set "RMAX=%%D"
     set "RAVG=%%E"
     set "RLOSS=%%F"
-    set "AVGNUM=!RAVG!"
-    set "ISNUM="
-    echo(!AVGNUM!| findstr /r "^[0-9][0-9]*$" >nul && set "ISNUM=1"
+    set "RDNS=%%H"
+    set "RCONN=%%I"
+    rem Only CONN ms decides: a server is listed only if CONN ms is a real number. Ping may fail (PING ms shows N/A) and it is still kept.
+    set "CONNNUM="
+    echo(!RCONN!| findstr /r "^[0-9][0-9]*$" >nul && set "CONNNUM=1"
     set "ACCEPT="
-    if not "!RCOUNT!"=="0" if defined ISNUM set "ACCEPT=1"
-    if defined PINGLIMIT if defined ISNUM if !AVGNUM! GEQ !PINGLIMIT! set "ACCEPT="
+    if defined CONNNUM set "ACCEPT=1"
     if defined ACCEPT (
         set /a ONLINE+=1
         set "REF[!ONLINE!]=!RIP!"
         set "REFPROVIDER[!ONLINE!]=Unavailable"
         set "REFLOCATION[!ONLINE!]=Unavailable"
-        set "REFMIN[!ONLINE!]=!RMIN!ms"
-        set "REFMAX[!ONLINE!]=!RMAX!ms"
         set "REFAVG[!ONLINE!]=!RAVG!ms"
+        if /i "!RAVG!"=="N/A" set "REFAVG[!ONLINE!]=N/A"
         set "REFLOSS[!ONLINE!]=!RLOSS!"
+        set "REFDNS[!ONLINE!]=!RDNS!ms"
+        if /i "!RDNS!"=="N/A" set "REFDNS[!ONLINE!]=N/A"
+        set "REFCONN[!ONLINE!]=!RCONN!ms"
+        if /i "!RCONN!"=="N/A" set "REFCONN[!ONLINE!]=N/A"
     )
 )
+del "!PING_INPUT!" "!PING_OUTPUT!" >nul 2>&1
 call :LOOKUPINFO
 goto RESULTS
 
@@ -235,33 +236,37 @@ echo.
 echo Tested !COUNT! DNS servers concurrently with !PING_THREADS! worker threads.
 echo.
 if !ONLINE! EQU 0 (
-    if defined PINGLIMIT (
-        echo No IP addresses met the requirement of responding with average ping below !PINGLIMIT! ms.
-    ) else (
-        echo No ping-responsive IPs with readable average-ping results were found.
-    )
-    echo Note: some DNS servers block ICMP ping but could still answer DNS queries.
+    echo No IPs with a readable CONN ms were found.
 ) else (
-    echo( REF.    IP ADDRESS            MIN      MAX      AVG  LOSS  PROVIDER                 LOCATION
+    echo( REF.    IP ADDRESS         CONN ms   DNS ms  PING ms  LOSS  PROVIDER                 LOCATION
     echo(--------------------------------------------------------------------------------------------------------------
     for /l %%N in (1,1,!ONLINE!) do (
         set "PAD=   %%N"
         set "CREF=!PAD:~-4!."
         set "PAD=!REF[%%N]!                "
         set "CIP=!PAD:~0,16!"
-        set "PAD=        !REFMIN[%%N]!"
-        set "CMIN=!PAD:~-8!"
-        set "PAD=        !REFMAX[%%N]!"
-        set "CMAX=!PAD:~-8!"
+        set "PAD=        !REFCONN[%%N]!"
+        set "CCONN=!PAD:~-8!"
+        set "PAD=        !REFDNS[%%N]!"
+        set "CDNS=!PAD:~-8!"
         set "PAD=        !REFAVG[%%N]!"
-        set "CAVG=!PAD:~-8!"
+        set "CPING=!PAD:~-8!"
         set "PAD=    !REFLOSS[%%N]!"
         set "CLOSS=!PAD:~-5!"
         set "CPROV=!REFPROVIDER[%%N]!                        "
         set "CPROV=!CPROV:~0,24!"
         set "CLOC=!REFLOCATION[%%N]!                                  "
         set "CLOC=!CLOC:~0,34!"
-        echo(!CREF!    !CIP! !CMIN! !CMAX! !CAVG! !CLOSS! !CPROV! !CLOC!
+        set "DNS_RESULT_LINE=!CREF!    !CIP! !CCONN! !CDNS! !CPING! !CLOSS! !CPROV! !CLOC!"
+        set "DNS_RESULT_ACTIVE=0"
+        for /l %%D in (1,1,!CURRENTDNSCOUNT!) do if /i "!REF[%%N]!"=="!CURRENTDNS[%%D]!" set "DNS_RESULT_ACTIVE=1"
+        set "RS_PRE="
+        set "RS_POST="
+        if "!DNS_RESULT_ACTIVE!"=="1" if defined ESC (
+            set "RS_PRE=!ESC![38;2;0;255;255m"
+            set "RS_POST=!ESC![92;40m"
+        )
+        echo(!RS_PRE!!DNS_RESULT_LINE!!RS_POST!
     )
 )
 echo.
@@ -310,6 +315,12 @@ set "VOTE_IP="
 set /p "VOTE_IP=Enter IPv4 address (or Q to return): "
 if /i "!VOTE_IP!"=="Q" goto VOTING
 if not defined VOTE_IP goto VOTESEARCH
+call :CHECKIPV4
+if not defined IPOK (
+    echo Please enter a valid IPv4 address, for example 8.8.8.8
+    pause
+    goto VOTESEARCH
+)
 call :GETVOTECOUNT
 echo.
 echo IP: !VOTE_IP!
@@ -369,6 +380,13 @@ if "!VRCHOICE!"=="1" goto VOTESEARCH
 if "!VRCHOICE!"=="2" goto VOTING
 goto VOTERESULTS
 
+:CHECKIPV4
+rem IPOK=1 only when VOTE_IP looks like a plain IPv4 address (stops odd text from breaking the vote file).
+set "IPOK="
+if not "!VOTE_IP:~15,1!"=="" exit /b
+echo(!VOTE_IP!| findstr /r /x "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul && set "IPOK=1"
+exit /b
+
 :GETVOTECOUNT
 set "VOTE_COUNT=0"
 if exist "!VOTES!" (
@@ -399,7 +417,7 @@ exit /b
 :SETDNS
 if not defined ONLINE set "ONLINE=0"
 if !ONLINE! LEQ 0 (
-    echo No ping-responsive IPs are available in the current results.
+    echo No usable DNS servers with a readable CONN ms are available in the current results.
     echo You can scrape and test again, or use another DNS tool to verify a server.
     pause
     goto START
@@ -416,7 +434,7 @@ echo DNS candidates are used in the numbered order below.
 echo Press ENTER to start with server !DNSINDEX! (last used when available); press 0 to cancel.
 echo During selection: ENTER = next DNS; BACKSPACE = previous DNS; Q = online ping results.
 echo.
-echo( REF.    IP ADDRESS       AVG PING  PROVIDER                 LOCATION
+echo( REF.    IP ADDRESS         CONN ms   DNS ms  PING ms  PROVIDER                 LOCATION
 echo(------------------------------------------------------------------------------------------------------------
 call :LOOKUPINFO
 for /l %%N in (1,1,!ONLINE!) do (
@@ -424,20 +442,23 @@ for /l %%N in (1,1,!ONLINE!) do (
     set "CREF=!PAD:~-4!."
     set "PAD=!REF[%%N]!                "
     set "CIP=!PAD:~0,16!"
+    set "PAD=        !REFCONN[%%N]!"
+    set "CCONN=!PAD:~-8!"
+    set "PAD=        !REFDNS[%%N]!"
+    set "CDNS=!PAD:~-8!"
     set "PAD=        !REFAVG[%%N]!"
-    set "CAVG=!PAD:~-8!"
+    set "CPING=!PAD:~-8!"
     set "CPROV=!REFPROVIDER[%%N]!                        "
     set "CPROV=!CPROV:~0,24!"
     set "CLOC=!REFLOCATION[%%N]!                                  "
     set "CLOC=!CLOC:~0,34!"
-    echo(!CREF!    !CIP! !CAVG!  !CPROV! !CLOC!
+    echo(!CREF!    !CIP! !CCONN! !CDNS! !CPING!  !CPROV! !CLOC!
 )
 echo.
 echo Current DNS configuration:
-echo DNS IP             PROVIDER                 LOCATION
-echo ---------------------------------------------------------------
-if !CURRENTDNSCOUNT! EQU 0 echo No DNS servers detected.
-for /l %%D in (1,1,!CURRENTDNSCOUNT!) do echo !CURRENTDNS[%%D]!  !CURRENTDNSPROVIDER[%%D]!  !CURRENTDNSLOCATION[%%D]!
+echo DNS IP            CONN ms   DNS ms  PING ms  PROVIDER                 LOCATION
+echo ----------------------------------------------------------------------------------------------------
+call :PRINTCURRENTROWS
 echo.
 set "AUTOSTART="
 set /p "AUTOSTART=Press ENTER to start (0 to cancel): "
@@ -447,30 +468,12 @@ if defined AUTOSTART (
     pause
     goto SETDNS
 )
-if defined START_CONNECTION_MONITOR goto MONITORCHOICE_DONE
-:ASKCONNECTIONMONITOR
- echo.
- echo Start with connection monitor? (Press ENTER for Yes, 1 for No)
- set "MONITORCHOICE="
- set /p "MONITORCHOICE=Choice: "
- if not defined MONITORCHOICE set "START_CONNECTION_MONITOR=1"
- if "!MONITORCHOICE!"=="1" set "START_CONNECTION_MONITOR=0"
- if defined MONITORCHOICE if not "!MONITORCHOICE!"=="1" (
-     echo Press ENTER to start with monitor, or 1 to start without it.
-     goto ASKCONNECTIONMONITOR
- )
-goto MONITORCHOICE_DONE
-:MONITORCHOICE_DONE
+:APPLYSELECTED
 call :APPLYDNS
 if errorlevel 1 (
     echo Failed to set the first DNS server. Check adapter name and run as Administrator.
     pause
     goto RESULTS
-)
-if "!START_CONNECTION_MONITOR!"=="1" if not defined CONNECTION_MONITOR_STARTED (
-    set "CONNECTION_MONITOR=%~f0"
-        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwB0AG8AcAAnAAoAJABwAGEAcgBlAG4AdAA9ACgARwBlAHQALQBDAGkAbQBJAG4AcwB0AGEAbgBjAGUAIAAtAEMAbABhAHMAcwBOAGEAbQBlACAAVwBpAG4AMwAyAF8AUAByAG8AYwBlAHMAcwAgAC0ARgBpAGwAdABlAHIAIAAoACcAUAByAG8AYwBlAHMAcwBJAGQAIAA9ACAAJwArACQAUABJAEQAKQApAC4AUABhAHIAZQBuAHQAUAByAG8AYwBlAHMAcwBJAGQACgAkAHAAYQByAGUAbgB0AFMAdABhAHIAdAA9ACgARwBlAHQALQBQAHIAbwBjAGUAcwBzACAALQBJAGQAIAAkAHAAYQByAGUAbgB0ACkALgBTAHQAYQByAHQAVABpAG0AZQAuAFQAaQBjAGsAcwAKACQAYwBtAGQAQQByAGcAcwA9ACcALwBjACAAIgAiACcAKwAkAGUAbgB2ADoAQwBPAE4ATgBFAEMAVABJAE8ATgBfAE0ATwBOAEkAVABPAFIAKwAnACIAIAAtAC0AYwBvAG4AbgBlAGMAdABpAG8AbgAtAG0AbwBuAGkAdABvAHIAIgAnAAoAJABtAG8AbgBpAHQAbwByAD0AUwB0AGEAcgB0AC0AUAByAG8AYwBlAHMAcwAgAC0ARgBpAGwAZQBQAGEAdABoACAAJABlAG4AdgA6AEMAbwBtAFMAcABlAGMAIAAtAEEAcgBnAHUAbQBlAG4AdABMAGkAcwB0ACAAJABjAG0AZABBAHIAZwBzACAALQBXAGkAbgBkAG8AdwBTAHQAeQBsAGUAIABIAGkAZABkAGUAbgAgAC0AUABhAHMAcwBUAGgAcgB1AAoAWwBJAE8ALgBGAGkAbABlAF0AOgA6AFcAcgBpAHQAZQBBAGwAbABUAGUAeAB0ACgAJABlAG4AdgA6AEMATwBOAE4ARQBDAFQASQBPAE4AXwBNAE8ATgBJAFQATwBSAF8AUABJAEQARgBJAEwARQAsAFsAcwB0AHIAaQBuAGcAXQAkAG0AbwBuAGkAdABvAHIALgBJAGQAKQAKACQAZQBuAHYAOgBEAE4AUwBfAE0ATwBOAEkAVABPAFIAXwBQAEEAUgBFAE4AVABfAFAASQBEAD0AWwBzAHQAcgBpAG4AZwBdACQAcABhAHIAZQBuAHQACgAkAGUAbgB2ADoARABOAFMAXwBNAE8ATgBJAFQATwBSAF8AUABBAFIARQBOAFQAXwBTAFQAQQBSAFQAPQBbAHMAdAByAGkAbgBnAF0AJABwAGEAcgBlAG4AdABTAHQAYQByAHQACgAkAGUAbgB2ADoARABOAFMAXwBNAE8ATgBJAFQATwBSAF8AQwBIAEkATABEAF8AUABJAEQAPQBbAHMAdAByAGkAbgBnAF0AJABtAG8AbgBpAHQAbwByAC4ASQBkAAoAJAB3AGEAdABjAGgAZQByAD0AJwAkAG0APQBbAGkAbgB0AF0AJABlAG4AdgA6AEQATgBTAF8ATQBPAE4ASQBUAE8AUgBfAFAAQQBSAEUATgBUAF8AUABJAEQAOwAkAHQAPQBbAGwAbwBuAGcAXQAkAGUAbgB2ADoARABOAFMAXwBNAE8ATgBJAFQATwBSAF8AUABBAFIARQBOAFQAXwBTAFQAQQBSAFQAOwAkAGMAPQBbAGkAbgB0AF0AJABlAG4AdgA6AEQATgBTAF8ATQBPAE4ASQBUAE8AUgBfAEMASABJAEwARABfAFAASQBEADsAJABmAD0AJABlAG4AdgA6AEMATwBOAE4ARQBDAFQASQBPAE4AXwBNAE8ATgBJAFQATwBSAF8AUABJAEQARgBJAEwARQA7AHcAaABpAGwAZQAoACQAdAByAHUAZQApAHsAJABwAD0ARwBlAHQALQBQAHIAbwBjAGUAcwBzACAALQBJAGQAIAAkAG0AIAAtAEUAcgByAG8AcgBBAGMAdABpAG8AbgAgAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAOwBpAGYAKAAhACQAcAAgAC0AbwByACAAJABwAC4AUwB0AGEAcgB0AFQAaQBtAGUALgBUAGkAYwBrAHMAIAAtAG4AZQAgACQAdAApAHsAJgAgAHQAYQBzAGsAawBpAGwAbAAuAGUAeABlACAALwBQAEkARAAgACQAYwAgAC8AVAAgAC8ARgAgAD4AJABuAHUAbABsACAAMgA+ACYAMQA7AFIAZQBtAG8AdgBlAC0ASQB0AGUAbQAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABmACAALQBGAG8AcgBjAGUAIAAtAEUAcgByAG8AcgBBAGMAdABpAG8AbgAgAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAOwBiAHIAZQBhAGsAfQA7AGkAZgAoACEAKABHAGUAdAAtAFAAcgBvAGMAZQBzAHMAIAAtAEkAZAAgACQAYwAgAC0ARQByAHIAbwByAEEAYwB0AGkAbwBuACAAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQApACkAewBSAGUAbQBvAHYAZQAtAEkAdABlAG0AIAAtAEwAaQB0AGUAcgBhAGwAUABhAHQAaAAgACQAZgAgAC0ARgBvAHIAYwBlACAALQBFAHIAcgBvAHIAQQBjAHQAaQBvAG4AIABTAGkAbABlAG4AdABsAHkAQwBvAG4AdABpAG4AdQBlADsAYgByAGUAYQBrAH0AOwBTAHQAYQByAHQALQBTAGwAZQBlAHAAIAAtAFMAZQBjAG8AbgBkAHMAIAAyAH0AJwAKACQAdwBhAHQAYwBoAGUAcgBFAG4AYwBvAGQAZQBkAD0AWwBDAG8AbgB2AGUAcgB0AF0AOgA6AFQAbwBCAGEAcwBlADYANABTAHQAcgBpAG4AZwAoAFsAVABlAHgAdAAuAEUAbgBjAG8AZABpAG4AZwBdADoAOgBVAG4AaQBjAG8AZABlAC4ARwBlAHQAQgB5AHQAZQBzACgAJAB3AGEAdABjAGgAZQByACkAKQAKAFMAdABhAHIAdAAtAFAAcgBvAGMAZQBzAHMAIAAtAEYAaQBsAGUAUABhAHQAaAAgACcAcABvAHcAZQByAHMAaABlAGwAbAAuAGUAeABlACcAIAAtAFcAaQBuAGQAbwB3AFMAdAB5AGwAZQAgAEgAaQBkAGQAZQBuACAALQBBAHIAZwB1AG0AZQBuAHQATABpAHMAdAAgACgAJwAtAE4AbwBQAHIAbwBmAGkAbABlACAALQBOAG8AbgBJAG4AdABlAHIAYQBjAHQAaQB2AGUAIAAtAEUAbgBjAG8AZABlAGQAQwBvAG0AbQBhAG4AZAAgACcAKwAkAHcAYQB0AGMAaABlAHIARQBuAGMAbwBkAGUAZAApAA==
-    if exist "!CONNECTION_MONITOR_PIDFILE!" set "CONNECTION_MONITOR_STARTED=1"
 )
 goto DNSMONITOR
 
@@ -480,11 +483,6 @@ cls
 call :MONITORHEADER
 netsh interface ipv4 set dnsservers name="!ADAPTER!" source=static address=!DNS! register=primary validate=no
 if errorlevel 1 exit /b 1
-if "!MONITOR_VISIBLE!"=="1" (
-    set "DNS_MONITOR_WINDOW_ACTION=show"
-    call :SETMONITORWINDOW
-)
->"!LASTDNS!" echo(!DNS!
 set "CURRENTDNSCOUNT=1"
 set "CURRENTDNS[1]=!DNS!"
 set "CURRENTDNSPROVIDER[1]=Unavailable"
@@ -493,137 +491,69 @@ for /l %%K in (1,1,!ONLINE!) do if "!REF[%%K]!"=="!DNS!" (
     set "CURRENTDNSPROVIDER[1]=!REFPROVIDER[%%K]!"
     set "CURRENTDNSLOCATION[1]=!REFLOCATION[%%K]!"
 )
-rem Flush Windows DNS resolver cache after each successful DNS change.
-ipconfig /flushdns
-if errorlevel 1 echo Warning: DNS changed, but the resolver cache could not be flushed.
-call :LOOKUPINFO
+rem Flush Windows DNS resolver cache after each successful DNS change (quiet).
+ipconfig /flushdns >nul 2>&1
+rem Record the new DNS only now (after set + flush).
+>"!LASTDNS!" echo(!DNS!
+rem Provider/location of the new DNS are already in REFPROVIDER/REFLOCATION (set above), so no
+rem PowerShell lookup is done here - it ran on EVERY ENTER/BACKSPACE and was the main source of lag.
 exit /b 0
 
 :DNSMONITOR
 cls
 call :MONITORHEADER
-if defined AUTOFAILOVER (echo Automatically switched after two consecutive endpoint failures. & set "AUTOFAILOVER=")
-powershell.exe -NoProfile -NonInteractive -Command "$oldTreat=[Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput=$true; $result=0; $next=0; $prev=0; while($result -eq 0){ if([Console]::KeyAvailable){$key=[Console]::ReadKey($true); if($key.Key -eq [ConsoleKey]::C -and ($key.Modifiers -band [ConsoleModifiers]::Control)){$result=5} elseif($key.Key -eq [ConsoleKey]::Q){$result=4} elseif($key.Key -eq [ConsoleKey]::S){$result=7} elseif($key.Key -eq [ConsoleKey]::Enter){$next++} elseif($key.Key -eq [ConsoleKey]::Backspace){$prev++}; if(($next+$prev) -gt 0 -and $result -eq 0){$until=[DateTime]::UtcNow.AddMilliseconds(120); while([DateTime]::UtcNow -lt $until){while([Console]::KeyAvailable){$key=[Console]::ReadKey($true); if($key.Key -eq [ConsoleKey]::C -and ($key.Modifiers -band [ConsoleModifiers]::Control)){$result=5} elseif($key.Key -eq [ConsoleKey]::Q){$result=4} elseif($key.Key -eq [ConsoleKey]::S){$result=7} elseif($key.Key -eq [ConsoleKey]::Enter){$next++} elseif($key.Key -eq [ConsoleKey]::Backspace){$prev++}}; Start-Sleep -Milliseconds 5}; $delta=$next-$prev; if($delta -ne 0 -and $result -eq 0){[IO.File]::WriteAllText($env:DNS_NAV_FILE,[string]$delta); $result=8}}}; if($result -eq 0 -and $env:DNS_MONITOR_STATUS_FILE -and (Test-Path -LiteralPath $env:DNS_MONITOR_STATUS_FILE)){$status=[IO.File]::ReadAllText($env:DNS_MONITOR_STATUS_FILE).Trim(); if($status -match '^([0-9]+)\|(.+)$' -and [int]$Matches[1] -ge 2 -and $Matches[2] -eq $env:DNS){$result=6}}; if($result -eq 0){Start-Sleep -Milliseconds 200}}; [Console]::TreatControlCAsInput=$oldTreat; exit $result" >nul 2>&1
-if errorlevel 8 goto BATCHNAV
-if errorlevel 7 goto TOGGLEMONITOR
-if errorlevel 6 goto AUTONEXTDNS
-if errorlevel 5 goto END
-if errorlevel 4 goto STOPMONITORANDMENU
-if errorlevel 3 goto PREVDNS
-if errorlevel 2 goto NEXTDNS
+del /q "!DNS_NAV_FILE!" >nul 2>&1
+powershell.exe -NoProfile -NonInteractive -Command "$old=[Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput=$true; $q=[char]34; $n=[int]$env:ONLINE; $orig=[int]$env:DNSINDEX; $idx=$orig; $applied=$orig; $pend=$false; $last=[DateTime]::UtcNow; $tick=0; $result=0; $fail=0; $info=@{}; $cache=@{}; try{if(Test-Path -LiteralPath $env:DNS_PROV_CACHE){foreach($l in Get-Content -LiteralPath $env:DNS_PROV_CACHE -Encoding UTF8){$x=$l -split '\|',3; if($x.Count -eq 3 -and $x[0].Trim() -match '^\d{1,3}(\.\d{1,3}){3}$' -and $x[1].Trim() -and $x[2].Trim()){$cache[$x[0].Trim()]=@{p=($x[1] -replace '[^\p{L}\p{N} .,_/+-]',' ').Trim();l=($x[2] -replace '[^\p{L}\p{N} .,_/+-]',' ').Trim()}}}}}catch{}; $fetch=$null; $fetchWc=$null; $fetchIp=''; $fetchAt=[DateTime]::MinValue; $fetchStart=[DateTime]::MinValue; function GetIp($i){[Environment]::GetEnvironmentVariable('REF['+$i+']')} function Prov($i){$k=GetIp $i; if($info.ContainsKey($k)){return $info[$k].p}; $e=[Environment]::GetEnvironmentVariable('REFPROVIDER['+$i+']'); if((-not $e -or $e -eq 'Unavailable') -and $cache.ContainsKey($k)){return $cache[$k].p}; return $e} function Loc($i){$k=GetIp $i; if($info.ContainsKey($k)){return $info[$k].l}; $e=[Environment]::GetEnvironmentVariable('REFLOCATION['+$i+']'); if((-not $e -or $e -eq 'Unavailable') -and $cache.ContainsKey($k)){return $cache[$k].l}; return $e} function Run($e,$a,$w){$s=New-Object System.Diagnostics.ProcessStartInfo -ArgumentList $e,$a; $s.UseShellExecute=$false; $s.CreateNoWindow=$true; $s.RedirectStandardOutput=$true; $s.RedirectStandardError=$true; $p=[System.Diagnostics.Process]::Start($s); if($w){$null=$p.StandardOutput.ReadToEnd(); $null=$p.StandardError.ReadToEnd(); $p.WaitForExit(); return ($p.ExitCode -eq 0)}; return $true}; function Apply($i){$ok=Run 'netsh.exe' ('interface ipv4 set dnsservers name='+$q+$env:ADAPTER+$q+' source=static address='+(GetIp $i)+' register=primary validate=no') $true; if($ok){$null=Run 'ipconfig.exe' '/flushdns' $true; [IO.File]::WriteAllText($env:LASTDNS,(GetIp $i)+[Environment]::NewLine)}; return $ok}; function Stat($n,$i){$v=[Environment]::GetEnvironmentVariable($n+'['+$i+']'); if($v){$v}else{'N/A'}} function Draw{$e='='*60; [Console]::Clear(); [Console]::WriteLine($e); [Console]::WriteLine('                 DNS SERVER SELECTION'); [Console]::WriteLine($e); [Console]::WriteLine('Adapter: '+$env:ADAPTER); [Console]::WriteLine('Current DNS: '+(GetIp $idx)+' (server '+$idx+' of '+$n+')'); [Console]::WriteLine('Provider: '+(Prov $idx)); [Console]::WriteLine('Location: '+(Loc $idx)); [Console]::WriteLine('Latency: CONN '+(Stat 'REFCONN' $idx)+'   DNS '+(Stat 'REFDNS' $idx)+'   PING '+(Stat 'REFAVG' $idx)+'   LOSS '+(Stat 'REFLOSS' $idx)); [Console]::WriteLine('ENTER: next DNS   BACKSPACE: previous DNS   Q: online ping results'); [Console]::WriteLine('')}; if($cache.ContainsKey((GetIp $idx)) -and ([Environment]::GetEnvironmentVariable('REFPROVIDER['+$idx+']') -eq 'Unavailable')){Draw}; while($result -eq 0){ if([Console]::KeyAvailable){$k=[Console]::ReadKey($true); if($k.Key -eq [ConsoleKey]::C -and ($k.Modifiers -band [ConsoleModifiers]::Control)){$result=5} elseif($k.Key -eq [ConsoleKey]::Q){$result=4} elseif($k.Key -eq [ConsoleKey]::Enter -and $n -gt 1){$idx=$idx %% $n + 1; $pend=$true; $last=[DateTime]::UtcNow; Draw} elseif($k.Key -eq [ConsoleKey]::Backspace -and $n -gt 1){$idx=($idx + $n - 2) %% $n + 1; $pend=$true; $last=[DateTime]::UtcNow; Draw} } if($result -eq 0 -and $pend -and (([DateTime]::UtcNow-$last).TotalMilliseconds -gt 150)){$pend=$false; if($idx -ne $applied){$t=$idx; if(Apply $t){$applied=$t}else{$result=8; $fail=$t}}} if($fetch -ne $null){if($fetch.IsCompleted){try{if(-not $fetch.IsFaulted -and -not $fetch.IsCanceled){$j=$fetch.Result | ConvertFrom-Json; if($j.status -eq 'success'){$pv=$j.isp; if(-not $pv){$pv=$j.org}; if(-not $pv){$pv=$j.asname}; $lc=(@($j.city,$j.regionName,$j.country) | Where-Object {$_}) -join ', '; $bad=[string][char]33; $pv=([string]$pv -replace '[^\p{L}\p{N} .,_/+-]',' ').Replace($bad,' ').Trim(); $lc=($lc -replace '[^\p{L}\p{N} .,_/+-]',' ').Replace($bad,' ').Trim(); if($pv -and $lc){$info[$fetchIp]=@{p=$pv;l=$lc}; $cache[$fetchIp]=@{p=$pv;l=$lc}; try{[IO.File]::WriteAllLines($env:DNS_PROV_CACHE,[string[]]@($cache.Keys | ForEach-Object {$_+'|'+$cache[$_].p+'|'+$cache[$_].l}))}catch{}; if((GetIp $idx) -eq $fetchIp){Draw}}}}}catch{}; $fetch=$null; try{$fetchWc.Dispose()}catch{}}elseif(([DateTime]::UtcNow-$fetchStart).TotalSeconds -gt 6){try{$fetchWc.CancelAsync()}catch{}}}elseif($result -eq 0 -and -not $pend -and $idx -eq $applied -and (([DateTime]::UtcNow-$fetchAt).TotalSeconds -gt 5)){$cp=Prov $idx; $cl=Loc $idx; if(-not $cp -or $cp -eq 'Unavailable' -or -not $cl -or $cl -eq 'Unavailable'){$fetchAt=[DateTime]::UtcNow; $fetchStart=$fetchAt; $fetchIp=GetIp $idx; try{$fetchWc=New-Object System.Net.WebClient; $fetch=$fetchWc.DownloadStringTaskAsync('http://ip-api.com/json/'+$fetchIp+'?fields=status,country,regionName,city,isp,org,asname')}catch{$fetch=$null}}} $tick++; if($result -eq 0){Start-Sleep -Milliseconds 25} } if($result -ne 8 -and $idx -ne $applied){if(Apply $idx){$applied=$idx}else{$result=8; $fail=$idx}} if($result -eq 8){[IO.File]::WriteAllText($env:DNS_NAV_FILE,'F|'+$fail)}elseif($applied -ne $orig){[IO.File]::WriteAllText($env:DNS_NAV_FILE,'S|'+$applied)} for($z=1;$z -le $n;$z++){$k=GetIp $z; $ev=[Environment]::GetEnvironmentVariable('REFPROVIDER['+$z+']'); if((-not $ev -or $ev -eq 'Unavailable') -and $cache.ContainsKey($k) -and -not $info.ContainsKey($k)){$info[$k]=$cache[$k]}}; if($info.Count -gt 0){try{[IO.File]::WriteAllLines($env:DNS_INFO_FILE,[string[]]@($info.Keys | ForEach-Object {$_+'|'+$info[$_].p+'|'+$info[$_].l}))}catch{}} [Console]::TreatControlCAsInput=$old; exit $result" 2>"!DNS_LISTENER_ERR!"
+set "PSRC=!errorlevel!"
+call :SYNCSTEP
+call :SYNCINFO
+if not "!PSRC!"=="4" if not "!PSRC!"=="5" if not "!PSRC!"=="8" goto LISTENERFAILED
+if "!PSRC!"=="8" goto BATCHNAV
+if "!PSRC!"=="5" goto END
+if "!PSRC!"=="4" goto BACKTORESULTS
 goto DNSMONITOR
 
-:TOGGLEMONITOR
-if "!MONITOR_VISIBLE!"=="1" (
-    set "MONITOR_VISIBLE=0"
-    set "DNS_MONITOR_WINDOW_ACTION=hide"
-) else (
-    set "MONITOR_VISIBLE=1"
-    set "DNS_MONITOR_WINDOW_ACTION=show"
+:LISTENERFAILED
+cls
+echo The ENTER / BACKSPACE key listener stopped unexpectedly (code !PSRC!).
+if exist "!DNS_LISTENER_ERR!" (
+    echo.
+    echo Details:
+    type "!DNS_LISTENER_ERR!"
 )
-call :SETMONITORWINDOW
-goto DNSMONITOR
-:SETMONITORWINDOW
-powershell.exe -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJAByAGEAdwA9AEcAZQB0AC0AQwBvAG4AdABlAG4AdAAgAC0ATABpAHQAZQByAGEAbABQAGEAdABoACAAJABlAG4AdgA6AEMATwBOAE4ARQBDAFQASQBPAE4AXwBNAE8ATgBJAFQATwBSAF8AUABJAEQARgBJAEwARQAgAC0AVABvAHQAYQBsAEMAbwB1AG4AdAAgADEACgAkAHQAYQByAGcAZQB0AD0AMAAKAGkAZgAoAC0AbgBvAHQAIABbAGkAbgB0AF0AOgA6AFQAcgB5AFAAYQByAHMAZQAoAFsAcwB0AHIAaQBuAGcAXQAkAHIAYQB3ACwAWwByAGUAZgBdACQAdABhAHIAZwBlAHQAKQApAHsAZQB4AGkAdAAgADEAfQAKACQAdAB5AHAAZQA9ACcAdQBzAGkAbgBnACAAUwB5AHMAdABlAG0AOwAgAHUAcwBpAG4AZwAgAFMAeQBzAHQAZQBtAC4AUgB1AG4AdABpAG0AZQAuAEkAbgB0AGUAcgBvAHAAUwBlAHIAdgBpAGMAZQBzADsAIABwAHUAYgBsAGkAYwAgAHMAdABhAHQAaQBjACAAYwBsAGEAcwBzACAARABuAHMATQBvAG4AaQB0AG8AcgBXAGkAbgBkAG8AdwBBAHAAaQAgAHsAIABbAEQAbABsAEkAbQBwAG8AcgB0ACgAIgBrAGUAcgBuAGUAbAAzADIALgBkAGwAbAAiACwAIABTAGUAdABMAGEAcwB0AEUAcgByAG8AcgA9AHQAcgB1AGUAKQBdACAAcAB1AGIAbABpAGMAIABzAHQAYQB0AGkAYwAgAGUAeAB0AGUAcgBuACAAYgBvAG8AbAAgAEYAcgBlAGUAQwBvAG4AcwBvAGwAZQAoACkAOwAgAFsARABsAGwASQBtAHAAbwByAHQAKAAiAGsAZQByAG4AZQBsADMAMgAuAGQAbABsACIALAAgAFMAZQB0AEwAYQBzAHQARQByAHIAbwByAD0AdAByAHUAZQApAF0AIABwAHUAYgBsAGkAYwAgAHMAdABhAHQAaQBjACAAZQB4AHQAZQByAG4AIABiAG8AbwBsACAAQQB0AHQAYQBjAGgAQwBvAG4AcwBvAGwAZQAoAHUAaQBuAHQAIABwAHIAbwBjAGUAcwBzAEkAZAApADsAIABbAEQAbABsAEkAbQBwAG8AcgB0ACgAIgBrAGUAcgBuAGUAbAAzADIALgBkAGwAbAAiACkAXQAgAHAAdQBiAGwAaQBjACAAcwB0AGEAdABpAGMAIABlAHgAdABlAHIAbgAgAEkAbgB0AFAAdAByACAARwBlAHQAQwBvAG4AcwBvAGwAZQBXAGkAbgBkAG8AdwAoACkAOwAgAFsARABsAGwASQBtAHAAbwByAHQAKAAiAHUAcwBlAHIAMwAyAC4AZABsAGwAIgApAF0AIABwAHUAYgBsAGkAYwAgAHMAdABhAHQAaQBjACAAZQB4AHQAZQByAG4AIABiAG8AbwBsACAAUwBoAG8AdwBXAGkAbgBkAG8AdwAoAEkAbgB0AFAAdAByACAAaABXAG4AZAAsAGkAbgB0ACAAbgBDAG0AZABTAGgAbwB3ACkAOwAgAH0AJwAKAEEAZABkAC0AVAB5AHAAZQAgAC0AVAB5AHAAZQBEAGUAZgBpAG4AaQB0AGkAbwBuACAAJAB0AHkAcABlACAALQBFAHIAcgBvAHIAQQBjAHQAaQBvAG4AIABTAGkAbABlAG4AdABsAHkAQwBvAG4AdABpAG4AdQBlAAoAWwB2AG8AaQBkAF0AWwBEAG4AcwBNAG8AbgBpAHQAbwByAFcAaQBuAGQAbwB3AEEAcABpAF0AOgA6AEYAcgBlAGUAQwBvAG4AcwBvAGwAZQAoACkACgBpAGYAKAAtAG4AbwB0ACAAWwBEAG4AcwBNAG8AbgBpAHQAbwByAFcAaQBuAGQAbwB3AEEAcABpAF0AOgA6AEEAdAB0AGEAYwBoAEMAbwBuAHMAbwBsAGUAKABbAHUAaQBuAHQAMwAyAF0AJAB0AGEAcgBnAGUAdAApACkAewBlAHgAaQB0ACAAMQB9AAoAJABoAGEAbgBkAGwAZQA9AFsARABuAHMATQBvAG4AaQB0AG8AcgBXAGkAbgBkAG8AdwBBAHAAaQBdADoAOgBHAGUAdABDAG8AbgBzAG8AbABlAFcAaQBuAGQAbwB3ACgAKQAKAGkAZgAoACQAaABhAG4AZABsAGUAIAAtAGUAcQAgAFsASQBuAHQAUAB0AHIAXQA6ADoAWgBlAHIAbwApAHsAWwB2AG8AaQBkAF0AWwBEAG4AcwBNAG8AbgBpAHQAbwByAFcAaQBuAGQAbwB3AEEAcABpAF0AOgA6AEYAcgBlAGUAQwBvAG4AcwBvAGwAZQAoACkAOwBlAHgAaQB0ACAAMQB9AAoAJABjAG8AbQBtAGEAbgBkAD0AMAAKAGkAZgAoACQAZQBuAHYAOgBEAE4AUwBfAE0ATwBOAEkAVABPAFIAXwBXAEkATgBEAE8AVwBfAEEAQwBUAEkATwBOACAALQBlAHEAIAAnAHMAaABvAHcAJwApAHsAJABjAG8AbQBtAGEAbgBkAD0ANQB9AAoAWwB2AG8AaQBkAF0AWwBEAG4AcwBNAG8AbgBpAHQAbwByAFcAaQBuAGQAbwB3AEEAcABpAF0AOgA6AFMAaABvAHcAVwBpAG4AZABvAHcAKAAkAGgAYQBuAGQAbABlACwAJABjAG8AbQBtAGEAbgBkACkACgBbAHYAbwBpAGQAXQBbAEQAbgBzAE0AbwBuAGkAdABvAHIAVwBpAG4AZABvAHcAQQBwAGkAXQA6ADoARgByAGUAZQBDAG8AbgBzAG8AbABlACgAKQAKAGUAeABpAHQAIAAwAA== >nul 2>&1
-exit /b
-
-:AUTONEXTDNS
-set "AUTOFAILOVER=1"
-goto NEXTDNS
+echo.
+pause
+goto RESULTS
 
 :BATCHNAV
 set "KEY_DELTA="
 if exist "!DNS_NAV_FILE!" set /p "KEY_DELTA="<"!DNS_NAV_FILE!"
 del /q "!DNS_NAV_FILE!" >nul 2>&1
 if not defined KEY_DELTA goto DNSMONITOR
-set /a DNSINDEX=((DNSINDEX-1+KEY_DELTA) %% ONLINE + ONLINE) %% ONLINE + 1
-call :GETCURRENTDNS
-if defined START_CONNECTION_MONITOR goto MONITORCHOICE_DONE
-:ASKCONNECTIONMONITOR
- echo.
- echo Start with connection monitor? (Press ENTER for Yes, 1 for No)
- set "MONITORCHOICE="
- set /p "MONITORCHOICE=Choice: "
- if not defined MONITORCHOICE set "START_CONNECTION_MONITOR=1"
- if "!MONITORCHOICE!"=="1" set "START_CONNECTION_MONITOR=0"
- if defined MONITORCHOICE if not "!MONITORCHOICE!"=="1" (
-     echo Press ENTER to start with monitor, or 1 to start without it.
-     goto ASKCONNECTIONMONITOR
- )
-goto MONITORCHOICE_DONE
-:MONITORCHOICE_DONE
-call :APPLYDNS
-if errorlevel 1 (
-    echo Failed to set DNS. Check adapter name and run as Administrator.
-    pause
-    goto RESULTS
+if "!KEY_DELTA:~0,2!"=="F|" (
+    set "DNSINDEX=!KEY_DELTA:~2!"
+    goto STEPAPPLY
 )
-goto DNSMONITOR
+set /a DNSINDEX=((DNSINDEX-1+KEY_DELTA) %% ONLINE + ONLINE) %% ONLINE + 1
+goto STEPAPPLY
 
 :NEXTDNS
 set /a DNSINDEX+=1
 if !DNSINDEX! GTR !ONLINE! set "DNSINDEX=1"
-call :GETCURRENTDNS
-if defined START_CONNECTION_MONITOR goto MONITORCHOICE_DONE
-:ASKCONNECTIONMONITOR
- echo.
- echo Start with connection monitor? (Press ENTER for Yes, 1 for No)
- set "MONITORCHOICE="
- set /p "MONITORCHOICE=Choice: "
- if not defined MONITORCHOICE set "START_CONNECTION_MONITOR=1"
- if "!MONITORCHOICE!"=="1" set "START_CONNECTION_MONITOR=0"
- if defined MONITORCHOICE if not "!MONITORCHOICE!"=="1" (
-     echo Press ENTER to start with monitor, or 1 to start without it.
-     goto ASKCONNECTIONMONITOR
- )
-goto MONITORCHOICE_DONE
-:MONITORCHOICE_DONE
-call :APPLYDNS
-if errorlevel 1 (
-    echo Failed to set DNS. Check adapter name and run as Administrator.
-    pause
-    goto RESULTS
-)
-goto DNSMONITOR
+goto STEPAPPLY
 
 :PREVDNS
 set /a DNSINDEX-=1
 if !DNSINDEX! LSS 1 set "DNSINDEX=!ONLINE!"
-call :GETCURRENTDNS
-if defined START_CONNECTION_MONITOR goto MONITORCHOICE_DONE
-:ASKCONNECTIONMONITOR
- echo.
- echo Start with connection monitor? (Press ENTER for Yes, 1 for No)
- set "MONITORCHOICE="
- set /p "MONITORCHOICE=Choice: "
- if not defined MONITORCHOICE set "START_CONNECTION_MONITOR=1"
- if "!MONITORCHOICE!"=="1" set "START_CONNECTION_MONITOR=0"
- if defined MONITORCHOICE if not "!MONITORCHOICE!"=="1" (
-     echo Press ENTER to start with monitor, or 1 to start without it.
-     goto ASKCONNECTIONMONITOR
- )
-goto MONITORCHOICE_DONE
-:MONITORCHOICE_DONE
-call :APPLYDNS
-if errorlevel 1 (
-    echo Failed to set DNS. Check adapter name and run as Administrator.
-    pause
-    goto RESULTS
-)
-goto DNSMONITOR
-:STOPMONITORANDMENU
-call :STOPCONNECTIONMONITOR
-goto RESULTS
+goto STEPAPPLY
 
-:STOPCONNECTIONMONITOR
-if exist "!CONNECTION_MONITOR_PIDFILE!" (
-    for /f "usebackq delims=" %%P in ("!CONNECTION_MONITOR_PIDFILE!") do taskkill /PID %%P /T /F >nul 2>&1
-    del /q "!CONNECTION_MONITOR_PIDFILE!" >nul 2>&1
-)
-del /q "!DNS_MONITOR_STATUS_FILE!" >nul 2>&1
-set "CONNECTION_MONITOR_STARTED="
+:STEPAPPLY
+call :GETCURRENTDNS
+goto APPLYSELECTED
+
+:BACKTORESULTS
 del /q "!DNS_NAV_FILE!" >nul 2>&1
-exit /b
+goto RESULTS
 
 :MONITORHEADER
 echo ============================================================
@@ -634,13 +564,54 @@ echo Current DNS: !DNS! (server !DNSINDEX! of !ONLINE!)
 for %%N in (!DNSINDEX!) do (
     echo Provider: !REFPROVIDER[%%N]!
     echo Location: !REFLOCATION[%%N]!
+    set "SCONN=!REFCONN[%%N]!"
+    set "SDNS=!REFDNS[%%N]!"
+    set "SPING=!REFAVG[%%N]!"
+    set "SLOSS=!REFLOSS[%%N]!"
+    if not defined SCONN set "SCONN=N/A"
+    if not defined SDNS set "SDNS=N/A"
+    if not defined SPING set "SPING=N/A"
+    if not defined SLOSS set "SLOSS=N/A"
+    echo Latency: CONN !SCONN!   DNS !SDNS!   PING !SPING!   LOSS !SLOSS!
 )
-echo ENTER: next DNS   BACKSPACE: previous DNS   S: show/hide checker   Q: online ping results
+echo ENTER: next DNS   BACKSPACE: previous DNS   Q: online ping results
 echo.
 exit /b
 
 :GETCURRENTDNS
 for %%N in (!DNSINDEX!) do set "DNS=!REF[%%N]!"
+exit /b
+
+:SYNCINFO
+rem Provider/location the key listener fetched in the background (e.g. after starting offline).
+if not exist "!DNS_INFO_FILE!" exit /b
+for /f "usebackq tokens=1-3 delims=|" %%A in ("!DNS_INFO_FILE!") do (
+    for /l %%N in (1,1,!ONLINE!) do if "!REF[%%N]!"=="%%A" (
+        set "REFPROVIDER[%%N]=%%B"
+        set "REFLOCATION[%%N]=%%C"
+    )
+)
+del /q "!DNS_INFO_FILE!" >nul 2>&1
+exit /b
+
+:SYNCSTEP
+rem The key listener now applies ENTER/BACKSPACE changes itself (no restart per press).
+rem Pick up the server index it ended on so the rest of the script stays in step.
+if not exist "!DNS_NAV_FILE!" exit /b
+set "SYNCLINE="
+set /p "SYNCLINE="<"!DNS_NAV_FILE!"
+if not "!SYNCLINE:~0,2!"=="S|" exit /b
+del /q "!DNS_NAV_FILE!" >nul 2>&1
+set "DNSINDEX=!SYNCLINE:~2!"
+call :GETCURRENTDNS
+set "CURRENTDNSCOUNT=1"
+set "CURRENTDNS[1]=!DNS!"
+set "CURRENTDNSPROVIDER[1]=Unavailable"
+set "CURRENTDNSLOCATION[1]=Unavailable"
+for /l %%K in (1,1,!ONLINE!) do if "!REF[%%K]!"=="!DNS!" (
+    set "CURRENTDNSPROVIDER[1]=!REFPROVIDER[%%K]!"
+    set "CURRENTDNSLOCATION[1]=!REFLOCATION[%%K]!"
+)
 exit /b
 
 :EXTRACTPINGSCRIPT
@@ -671,8 +642,9 @@ if not defined CURRENTDNSCOUNT set "CURRENTDNSCOUNT=0"
 )
 set /a CURRENTDNSCOUNT=0
 set "DNS_INFO_INPUT=!INFO_INPUT!"
+if exist "!DNS_PROV_CACHE!" powershell.exe -NoProfile -NonInteractive -Command "$c=@{}; foreach($l in Get-Content -LiteralPath $env:DNS_PROV_CACHE -Encoding UTF8){$x=$l -split '\|',3; if($x.Count -eq 3){$c[$x[0].Trim()]=$x}}; $o=foreach($l in Get-Content -LiteralPath $env:INFO_INPUT){$x=$l -split '\|',3; if($x.Count -eq 3 -and $c.ContainsKey($x[0].Trim()) -and (($x[1].Trim() -eq 'Unavailable') -or ($x[2].Trim() -eq 'Unavailable'))){$x[0]+'|'+$c[$x[0].Trim()][1]+'|'+$c[$x[0].Trim()][2]}else{$l}}; Set-Content -LiteralPath $env:INFO_INPUT -Value $o" >nul 2>&1
 REM Embedded provider and location lookup (ip-api batch, with ipinfo fallback).
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJABpAG4AcAB1AHQASQBwAHMAPQBOAGUAdwAtAE8AYgBqAGUAYwB0ACAAUwB5AHMAdABlAG0ALgBDAG8AbABsAGUAYwB0AGkAbwBuAHMALgBHAGUAbgBlAHIAaQBjAC4ATABpAHMAdABbAHMAdAByAGkAbgBnAF0ACgAkAGMAYQBjAGgAZQA9AEAAewB9AAoAZgBvAHIAZQBhAGMAaAAoACQAbABpAG4AZQAgAGkAbgAgAEAAKABHAGUAdAAtAEMAbwBuAHQAZQBuAHQAIAAtAEwAaQB0AGUAcgBhAGwAUABhAHQAaAAgACQAZQBuAHYAOgBEAE4AUwBfAEkATgBGAE8AXwBJAE4AUABVAFQAKQApAHsAIAAkAHAAYQByAHQAcwA9ACQAbABpAG4AZQAgAC0AcwBwAGwAaQB0ACAAJwBcAHwAJwAsADMAOwAgAGkAZgAoACQAcABhAHIAdABzAC4AQwBvAHUAbgB0ACAALQBsAHQAIAAzACkAewBjAG8AbgB0AGkAbgB1AGUAfQA7ACAAJABpAHAAPQAkAHAAYQByAHQAcwBbADAAXQAuAFQAcgBpAG0AKAApADsAIABpAGYAKAAhACQAaQBwACkAewBjAG8AbgB0AGkAbgB1AGUAfQA7ACAAJABpAG4AcAB1AHQASQBwAHMALgBBAGQAZAAoACQAaQBwACkAOwAgACQAcAByAG8AdgBpAGQAZQByAD0AJABwAGEAcgB0AHMAWwAxAF0ALgBUAHIAaQBtACgAKQA7ACAAJABsAG8AYwBhAHQAaQBvAG4APQAkAHAAYQByAHQAcwBbADIAXQAuAFQAcgBpAG0AKAApADsAIABpAGYAKAAkAHAAcgBvAHYAaQBkAGUAcgAgAC0AZQBxACAAJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwApAHsAJABwAHIAbwB2AGkAZABlAHIAPQAnACcAfQA7ACAAaQBmACgAJABsAG8AYwBhAHQAaQBvAG4AIAAtAGUAcQAgACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAKQB7ACQAbABvAGMAYQB0AGkAbwBuAD0AJwAnAH0AOwAgAGkAZgAoACQAcAByAG8AdgBpAGQAZQByACAALQBvAHIAIAAkAGwAbwBjAGEAdABpAG8AbgApAHsAJABjAGEAYwBoAGUAWwAkAGkAcABdAD0AQAB7AHAAPQAkAHAAcgBvAHYAaQBkAGUAcgA7AGwAPQAkAGwAbwBjAGEAdABpAG8AbgB9AH0AIAB9AAoAJABjAHUAcgByAGUAbgB0AEQAbgBzAD0AQAAoAEcAZQB0AC0ARABuAHMAQwBsAGkAZQBuAHQAUwBlAHIAdgBlAHIAQQBkAGQAcgBlAHMAcwAgAC0ASQBuAHQAZQByAGYAYQBjAGUAQQBsAGkAYQBzACAAJABlAG4AdgA6AEEARABBAFAAVABFAFIAIAAtAEUAcgByAG8AcgBBAGMAdABpAG8AbgAgAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAIAB8ACAARgBvAHIARQBhAGMAaAAtAE8AYgBqAGUAYwB0ACAAewAkAF8ALgBTAGUAcgB2AGUAcgBBAGQAZAByAGUAcwBzAGUAcwB9ACAAfAAgAFcAaABlAHIAZQAtAE8AYgBqAGUAYwB0ACAAewAkAF8AfQAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAJABpAHAAcwA9AEAAKAAkAGkAbgBwAHUAdABJAHAAcwArACQAYwB1AHIAcgBlAG4AdABEAG4AcwAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAJAB0AG8AZABvAD0AQAAoACQAaQBwAHMAIAB8ACAAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACEAJABjAGEAYwBoAGUALgBDAG8AbgB0AGEAaQBuAHMASwBlAHkAKAAkAF8AKQAgAC0AbwByACAAIQAkAGMAYQBjAGgAZQBbACQAXwBdAC4AcAAgAC0AbwByACAAIQAkAGMAYQBjAGgAZQBbACQAXwBdAC4AbAB9ACkACgBmAG8AcgAoACQAcwB0AGEAcgB0AD0AMAA7ACQAcwB0AGEAcgB0ACAALQBsAHQAIAAkAHQAbwBkAG8ALgBDAG8AdQBuAHQAOwAkAHMAdABhAHIAdAArAD0AMQAwADAAKQB7ACAAJABsAGEAcwB0AD0AWwBNAGEAdABoAF0AOgA6AE0AaQBuACgAJABzAHQAYQByAHQAKwA5ADkALAAkAHQAbwBkAG8ALgBDAG8AdQBuAHQALQAxACkAOwAgACQAYwBoAHUAbgBrAD0AQAAoACQAdABvAGQAbwBbACQAcwB0AGEAcgB0AC4ALgAkAGwAYQBzAHQAXQApADsAIAB0AHIAeQAgAHsAIAAkAGEAbgBzAD0ASQBuAHYAbwBrAGUALQBSAGUAcwB0AE0AZQB0AGgAbwBkACAALQBVAHIAaQAgACcAaAB0AHQAcAA6AC8ALwBpAHAALQBhAHAAaQAuAGMAbwBtAC8AYgBhAHQAYwBoAD8AZgBpAGUAbABkAHMAPQBzAHQAYQB0AHUAcwAsAGMAbwB1AG4AdAByAHkALAByAGUAZwBpAG8AbgBOAGEAbQBlACwAYwBpAHQAeQAsAGkAcwBwACwAbwByAGcALABhAHMAbgBhAG0AZQAsAHEAdQBlAHIAeQAnACAALQBNAGUAdABoAG8AZAAgAFAAbwBzAHQAIAAtAEIAbwBkAHkAIAAoAEMAbwBuAHYAZQByAHQAVABvAC0ASgBzAG8AbgAgAC0ASQBuAHAAdQB0AE8AYgBqAGUAYwB0ACAAJABjAGgAdQBuAGsAIAAtAEMAbwBtAHAAcgBlAHMAcwApACAALQBDAG8AbgB0AGUAbgB0AFQAeQBwAGUAIAAnAGEAcABwAGwAaQBjAGEAdABpAG8AbgAvAGoAcwBvAG4AJwAgAC0AVABpAG0AZQBvAHUAdABTAGUAYwAgADIAMAA7ACAAZgBvAHIAZQBhAGMAaAAoACQAeAAgAGkAbgAgAEAAKAAkAGEAbgBzACkAKQB7ACAAaQBmACgAJAB4AC4AcwB0AGEAdAB1AHMAIAAtAG4AZQAgACcAcwB1AGMAYwBlAHMAcwAnACkAewBjAG8AbgB0AGkAbgB1AGUAfQA7ACAAJABpAHAAPQBbAHMAdAByAGkAbgBnAF0AJAB4AC4AcQB1AGUAcgB5ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAC4AQwBvAG4AdABhAGkAbgBzAEsAZQB5ACgAJABpAHAAKQApAHsAJABjAGEAYwBoAGUAWwAkAGkAcABdAD0AQAB7AHAAPQAnACcAOwBsAD0AJwAnAH0AfQA7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAeAAuAGkAcwBwADsAIABpAGYAKAAhACQAcAByAG8AdgBpAGQAZQByACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAeAAuAG8AcgBnAH0AOwAgAGkAZgAoACEAJABwAHIAbwB2AGkAZABlAHIAKQB7ACQAcAByAG8AdgBpAGQAZQByAD0AJAB4AC4AYQBzAG4AYQBtAGUAfQA7ACAAJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AcAA9AFsAcwB0AHIAaQBuAGcAXQAkAHAAcgBvAHYAaQBkAGUAcgB9ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAPQAoAEAAKAAkAHgALgBjAGkAdAB5ACwAJAB4AC4AcgBlAGcAaQBvAG4ATgBhAG0AZQAsACQAeAAuAGMAbwB1AG4AdAByAHkAKQB8AFcAaABlAHIAZQAtAE8AYgBqAGUAYwB0ACAAewAkAF8AfQApACAALQBqAG8AaQBuACAAJwAsACAAJwB9ACAAfQAgAH0AIABjAGEAdABjAGgAIAB7AH0AIAB9AAoAZgBvAHIAZQBhAGMAaAAoACQAaQBwACAAaQBuACAAJAB0AG8AZABvACkAewAgAGkAZgAoACEAJABjAGEAYwBoAGUALgBDAG8AbgB0AGEAaQBuAHMASwBlAHkAKAAkAGkAcAApACkAewAkAGMAYQBjAGgAZQBbACQAaQBwAF0APQBAAHsAcAA9ACcAJwA7AGwAPQAnACcAfQB9ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAIAAtAG8AcgAgACEAJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AbAApAHsAIAB0AHIAeQAgAHsAIAAkAHgAPQBJAG4AdgBvAGsAZQAtAFIAZQBzAHQATQBlAHQAaABvAGQAIAAtAFUAcgBpACAAKAAnAGgAdAB0AHAAcwA6AC8ALwBpAHAAaQBuAGYAbwAuAGkAbwAvACcAKwBbAHUAcgBpAF0AOgA6AEUAcwBjAGEAcABlAEQAYQB0AGEAUwB0AHIAaQBuAGcAKAAkAGkAcAApACsAJwAvAGoAcwBvAG4AJwApACAALQBUAGkAbQBlAG8AdQB0AFMAZQBjACAAMgAwADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAPQBbAHMAdAByAGkAbgBnAF0AJAB4AC4AbwByAGcAfQA7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBsACkAewAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBsAD0AKABAACgAJAB4AC4AYwBpAHQAeQAsACQAeAAuAHIAZQBnAGkAbwBuACwAJAB4AC4AYwBvAHUAbgB0AHIAeQApAHwAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACQAXwB9ACkAIAAtAGoAbwBpAG4AIAAnACwAIAAnAH0AIAB9ACAAYwBhAHQAYwBoACAAewB9ACAAfQA7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwACkAewAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwAD0AJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwB9ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAPQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnAH0AIAB9AAoAZgB1AG4AYwB0AGkAbwBuACAAVwByAGkAdABlAC0ASQBuAGYAbwBMAGkAbgBlACgAJABrAGkAbgBkACwAJABpAHAAKQB7ACAAJABwAD0AKABbAHMAdAByAGkAbgBnAF0AJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AcAAgAC0AcgBlAHAAbABhAGMAZQAgACcAXABzACoAXAAoAEEAUwBcAGQAKwBcACkAJwAsACcAJwAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwB8AFwAdABcAHIAXABuAF0AJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACAAJABsAD0AKABbAHMAdAByAGkAbgBnAF0AJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AbAAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwB8AFwAdABcAHIAXABuAF0AJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACAAaQBmACgAIQAkAHAAKQB7ACQAcAA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQA7ACAAaQBmACgAIQAkAGwAKQB7ACQAbAA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQA7ACAAJABrAGkAbgBkACsAJwB8ACcAKwAkAGkAcAArACcAfAAnACsAJABwACsAJwB8ACcAKwAkAGwAIAB9AAoAZgBvAHIAZQBhAGMAaAAoACQAaQBwACAAaQBuACAAJABpAG4AcAB1AHQASQBwAHMAKQB7ACAAVwByAGkAdABlAC0ASQBuAGYAbwBMAGkAbgBlACAAJwBJACcAIAAkAGkAcAAgAH0ACgBmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGMAdQByAHIAZQBuAHQARABuAHMAKQB7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQAuAEMAbwBuAHQAYQBpAG4AcwBLAGUAeQAoACQAaQBwACkAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQA9AEAAewBwAD0AJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwA7AGwAPQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnAH0AfQA7ACAAVwByAGkAdABlAC0ASQBuAGYAbwBMAGkAbgBlACAAJwBDACcAIAAkAGkAcAAgAH0A > "!INFO_OUTPUT!" 2>nul
+powershell.exe -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA9ACcAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAnAAoAJABpAG4AcAB1AHQASQBwAHMAPQBOAGUAdwAtAE8AYgBqAGUAYwB0ACAAUwB5AHMAdABlAG0ALgBDAG8AbABsAGUAYwB0AGkAbwBuAHMALgBHAGUAbgBlAHIAaQBjAC4ATABpAHMAdABbAHMAdAByAGkAbgBnAF0ACgAkAGMAYQBjAGgAZQA9AEAAewB9AAoAZgBvAHIAZQBhAGMAaAAoACQAbABpAG4AZQAgAGkAbgAgAEAAKABHAGUAdAAtAEMAbwBuAHQAZQBuAHQAIAAtAEwAaQB0AGUAcgBhAGwAUABhAHQAaAAgACQAZQBuAHYAOgBEAE4AUwBfAEkATgBGAE8AXwBJAE4AUABVAFQAKQApAHsAIAAkAHAAYQByAHQAcwA9ACQAbABpAG4AZQAgAC0AcwBwAGwAaQB0ACAAJwBcAHwAJwAsADMAOwAgAGkAZgAoACQAcABhAHIAdABzAC4AQwBvAHUAbgB0ACAALQBsAHQAIAAzACkAewBjAG8AbgB0AGkAbgB1AGUAfQA7ACAAJABpAHAAPQAkAHAAYQByAHQAcwBbADAAXQAuAFQAcgBpAG0AKAApADsAIABpAGYAKAAhACQAaQBwACkAewBjAG8AbgB0AGkAbgB1AGUAfQA7ACAAJABpAG4AcAB1AHQASQBwAHMALgBBAGQAZAAoACQAaQBwACkAOwAgACQAcAByAG8AdgBpAGQAZQByAD0AJABwAGEAcgB0AHMAWwAxAF0ALgBUAHIAaQBtACgAKQA7ACAAJABsAG8AYwBhAHQAaQBvAG4APQAkAHAAYQByAHQAcwBbADIAXQAuAFQAcgBpAG0AKAApADsAIABpAGYAKAAkAHAAcgBvAHYAaQBkAGUAcgAgAC0AZQBxACAAJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwApAHsAJABwAHIAbwB2AGkAZABlAHIAPQAnACcAfQA7ACAAaQBmACgAJABsAG8AYwBhAHQAaQBvAG4AIAAtAGUAcQAgACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAKQB7ACQAbABvAGMAYQB0AGkAbwBuAD0AJwAnAH0AOwAgAGkAZgAoACQAcAByAG8AdgBpAGQAZQByACAALQBvAHIAIAAkAGwAbwBjAGEAdABpAG8AbgApAHsAJABjAGEAYwBoAGUAWwAkAGkAcABdAD0AQAB7AHAAPQAkAHAAcgBvAHYAaQBkAGUAcgA7AGwAPQAkAGwAbwBjAGEAdABpAG8AbgB9AH0AIAB9AAoAJABjAHUAcgByAGUAbgB0AEQAbgBzAD0AQAAoAEcAZQB0AC0ARABuAHMAQwBsAGkAZQBuAHQAUwBlAHIAdgBlAHIAQQBkAGQAcgBlAHMAcwAgAC0ASQBuAHQAZQByAGYAYQBjAGUAQQBsAGkAYQBzACAAJABlAG4AdgA6AEEARABBAFAAVABFAFIAIAAtAEUAcgByAG8AcgBBAGMAdABpAG8AbgAgAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAIAB8ACAARgBvAHIARQBhAGMAaAAtAE8AYgBqAGUAYwB0ACAAewAkAF8ALgBTAGUAcgB2AGUAcgBBAGQAZAByAGUAcwBzAGUAcwB9ACAAfAAgAFcAaABlAHIAZQAtAE8AYgBqAGUAYwB0ACAAewAkAF8AfQAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAJABpAHAAcwA9AEAAKAAkAGkAbgBwAHUAdABJAHAAcwArACQAYwB1AHIAcgBlAG4AdABEAG4AcwAgAHwAIABTAGUAbABlAGMAdAAtAE8AYgBqAGUAYwB0ACAALQBVAG4AaQBxAHUAZQApAAoAJAB0AG8AZABvAD0AQAAoACQAaQBwAHMAIAB8ACAAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACEAJABjAGEAYwBoAGUALgBDAG8AbgB0AGEAaQBuAHMASwBlAHkAKAAkAF8AKQAgAC0AbwByACAAIQAkAGMAYQBjAGgAZQBbACQAXwBdAC4AcAAgAC0AbwByACAAIQAkAGMAYQBjAGgAZQBbACQAXwBdAC4AbAB9ACkACgBmAG8AcgAoACQAcwB0AGEAcgB0AD0AMAA7ACQAcwB0AGEAcgB0ACAALQBsAHQAIAAkAHQAbwBkAG8ALgBDAG8AdQBuAHQAOwAkAHMAdABhAHIAdAArAD0AMQAwADAAKQB7ACAAJABsAGEAcwB0AD0AWwBNAGEAdABoAF0AOgA6AE0AaQBuACgAJABzAHQAYQByAHQAKwA5ADkALAAkAHQAbwBkAG8ALgBDAG8AdQBuAHQALQAxACkAOwAgACQAYwBoAHUAbgBrAD0AQAAoACQAdABvAGQAbwBbACQAcwB0AGEAcgB0AC4ALgAkAGwAYQBzAHQAXQApADsAIAB0AHIAeQAgAHsAIAAkAGEAbgBzAD0ASQBuAHYAbwBrAGUALQBSAGUAcwB0AE0AZQB0AGgAbwBkACAALQBVAHIAaQAgACcAaAB0AHQAcAA6AC8ALwBpAHAALQBhAHAAaQAuAGMAbwBtAC8AYgBhAHQAYwBoAD8AZgBpAGUAbABkAHMAPQBzAHQAYQB0AHUAcwAsAGMAbwB1AG4AdAByAHkALAByAGUAZwBpAG8AbgBOAGEAbQBlACwAYwBpAHQAeQAsAGkAcwBwACwAbwByAGcALABhAHMAbgBhAG0AZQAsAHEAdQBlAHIAeQAnACAALQBNAGUAdABoAG8AZAAgAFAAbwBzAHQAIAAtAEIAbwBkAHkAIAAoAEMAbwBuAHYAZQByAHQAVABvAC0ASgBzAG8AbgAgAC0ASQBuAHAAdQB0AE8AYgBqAGUAYwB0ACAAJABjAGgAdQBuAGsAIAAtAEMAbwBtAHAAcgBlAHMAcwApACAALQBDAG8AbgB0AGUAbgB0AFQAeQBwAGUAIAAnAGEAcABwAGwAaQBjAGEAdABpAG8AbgAvAGoAcwBvAG4AJwAgAC0AVABpAG0AZQBvAHUAdABTAGUAYwAgADIAMAA7ACAAZgBvAHIAZQBhAGMAaAAoACQAeAAgAGkAbgAgAEAAKAAkAGEAbgBzACkAKQB7ACAAaQBmACgAJAB4AC4AcwB0AGEAdAB1AHMAIAAtAG4AZQAgACcAcwB1AGMAYwBlAHMAcwAnACkAewBjAG8AbgB0AGkAbgB1AGUAfQA7ACAAJABpAHAAPQBbAHMAdAByAGkAbgBnAF0AJAB4AC4AcQB1AGUAcgB5ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAC4AQwBvAG4AdABhAGkAbgBzAEsAZQB5ACgAJABpAHAAKQApAHsAJABjAGEAYwBoAGUAWwAkAGkAcABdAD0AQAB7AHAAPQAnACcAOwBsAD0AJwAnAH0AfQA7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAeAAuAGkAcwBwADsAIABpAGYAKAAhACQAcAByAG8AdgBpAGQAZQByACkAewAkAHAAcgBvAHYAaQBkAGUAcgA9ACQAeAAuAG8AcgBnAH0AOwAgAGkAZgAoACEAJABwAHIAbwB2AGkAZABlAHIAKQB7ACQAcAByAG8AdgBpAGQAZQByAD0AJAB4AC4AYQBzAG4AYQBtAGUAfQA7ACAAJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AcAA9AFsAcwB0AHIAaQBuAGcAXQAkAHAAcgBvAHYAaQBkAGUAcgB9ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAPQAoAEAAKAAkAHgALgBjAGkAdAB5ACwAJAB4AC4AcgBlAGcAaQBvAG4ATgBhAG0AZQAsACQAeAAuAGMAbwB1AG4AdAByAHkAKQB8AFcAaABlAHIAZQAtAE8AYgBqAGUAYwB0ACAAewAkAF8AfQApACAALQBqAG8AaQBuACAAJwAsACAAJwB9ACAAfQAgAH0AIABjAGEAdABjAGgAIAB7AH0AIAB9AAoAZgBvAHIAZQBhAGMAaAAoACQAaQBwACAAaQBuACAAJAB0AG8AZABvACkAewAgAGkAZgAoACEAJABjAGEAYwBoAGUALgBDAG8AbgB0AGEAaQBuAHMASwBlAHkAKAAkAGkAcAApACkAewAkAGMAYQBjAGgAZQBbACQAaQBwAF0APQBAAHsAcAA9ACcAJwA7AGwAPQAnACcAfQB9ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAIAAtAG8AcgAgACEAJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AbAApAHsAIAB0AHIAeQAgAHsAIAAkAHgAPQBJAG4AdgBvAGsAZQAtAFIAZQBzAHQATQBlAHQAaABvAGQAIAAtAFUAcgBpACAAKAAnAGgAdAB0AHAAcwA6AC8ALwBpAHAAaQBuAGYAbwAuAGkAbwAvACcAKwBbAHUAcgBpAF0AOgA6AEUAcwBjAGEAcABlAEQAYQB0AGEAUwB0AHIAaQBuAGcAKAAkAGkAcAApACsAJwAvAGoAcwBvAG4AJwApACAALQBUAGkAbQBlAG8AdQB0AFMAZQBjACAAMgAwADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAHAAPQBbAHMAdAByAGkAbgBnAF0AJAB4AC4AbwByAGcAfQA7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBsACkAewAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBsAD0AKABAACgAJAB4AC4AYwBpAHQAeQAsACQAeAAuAHIAZQBnAGkAbwBuACwAJAB4AC4AYwBvAHUAbgB0AHIAeQApAHwAVwBoAGUAcgBlAC0ATwBiAGoAZQBjAHQAIAB7ACQAXwB9ACkAIAAtAGoAbwBpAG4AIAAnACwAIAAnAH0AIAB9ACAAYwBhAHQAYwBoACAAewB9ACAAfQA7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwACkAewAkAGMAYQBjAGgAZQBbACQAaQBwAF0ALgBwAD0AJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwB9ADsAIABpAGYAKAAhACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQAuAGwAPQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnAH0AIAB9AAoAZgB1AG4AYwB0AGkAbwBuACAAVwByAGkAdABlAC0ASQBuAGYAbwBMAGkAbgBlACgAJABrAGkAbgBkACwAJABpAHAAKQB7ACAAJABwAD0AKABbAHMAdAByAGkAbgBnAF0AJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AcAAgAC0AcgBlAHAAbABhAGMAZQAgACcAXABzACoAXAAoAEEAUwBcAGQAKwBcACkAJwAsACcAJwAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwBeAFwAcAB7AEwAfQBcAHAAewBOAH0AIAAuACwAXwAvACsALQBdACcALAAnACAAJwAgAC0AcgBlAHAAbABhAGMAZQAgACcAXABzACsAJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACAAJABsAD0AKABbAHMAdAByAGkAbgBnAF0AJABjAGEAYwBoAGUAWwAkAGkAcABdAC4AbAAgAC0AcgBlAHAAbABhAGMAZQAgACcAWwBeAFwAcAB7AEwAfQBcAHAAewBOAH0AIAAuACwAXwAvACsALQBdACcALAAnACAAJwAgAC0AcgBlAHAAbABhAGMAZQAgACcAXABzACsAJwAsACcAIAAnACkALgBUAHIAaQBtACgAKQA7ACAAaQBmACgAIQAkAHAAKQB7ACQAcAA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQA7ACAAaQBmACgAIQAkAGwAKQB7ACQAbAA9ACcAVQBuAGEAdgBhAGkAbABhAGIAbABlACcAfQA7ACAAJABrAGkAbgBkACsAJwB8ACcAKwAkAGkAcAArACcAfAAnACsAJABwACsAJwB8ACcAKwAkAGwAIAB9AAoAZgBvAHIAZQBhAGMAaAAoACQAaQBwACAAaQBuACAAJABpAG4AcAB1AHQASQBwAHMAKQB7ACAAVwByAGkAdABlAC0ASQBuAGYAbwBMAGkAbgBlACAAJwBJACcAIAAkAGkAcAAgAH0ACgBmAG8AcgBlAGEAYwBoACgAJABpAHAAIABpAG4AIAAkAGMAdQByAHIAZQBuAHQARABuAHMAKQB7ACAAaQBmACgAIQAkAGMAYQBjAGgAZQAuAEMAbwBuAHQAYQBpAG4AcwBLAGUAeQAoACQAaQBwACkAKQB7ACQAYwBhAGMAaABlAFsAJABpAHAAXQA9AEAAewBwAD0AJwBVAG4AYQB2AGEAaQBsAGEAYgBsAGUAJwA7AGwAPQAnAFUAbgBhAHYAYQBpAGwAYQBiAGwAZQAnAH0AfQA7ACAAVwByAGkAdABlAC0ASQBuAGYAbwBMAGkAbgBlACAAJwBDACcAIAAkAGkAcAAgAH0A > "!INFO_OUTPUT!" 2>nul
 if exist "!INFO_OUTPUT!" (
     for /f "usebackq tokens=1-4 delims=|" %%A in ("!INFO_OUTPUT!") do (
         if "%%A"=="I" for /l %%N in (1,1,!ONLINE!) do if "!REF[%%N]!"=="%%B" (
@@ -687,6 +659,7 @@ if exist "!INFO_OUTPUT!" (
         )
     )
 )
+if exist "!INFO_OUTPUT!" powershell.exe -NoProfile -NonInteractive -Command "$c=@{}; if(Test-Path -LiteralPath $env:DNS_PROV_CACHE){foreach($l in Get-Content -LiteralPath $env:DNS_PROV_CACHE -Encoding UTF8){$x=$l -split '\|',3; if($x.Count -eq 3){$c[$x[0].Trim()]=$l}}}; foreach($l in Get-Content -LiteralPath $env:INFO_OUTPUT){$x=$l -split '\|',4; if($x.Count -eq 4 -and $x[2].Trim() -and $x[2].Trim() -ne 'Unavailable' -and $x[3].Trim() -and $x[3].Trim() -ne 'Unavailable'){$c[$x[1].Trim()]=$x[1].Trim()+'|'+$x[2].Trim()+'|'+$x[3].Trim()}}; [IO.File]::WriteAllLines($env:DNS_PROV_CACHE,[string[]]@($c.Values))" >nul 2>&1
 del "!INFO_INPUT!" "!INFO_OUTPUT!" >nul 2>&1
 exit /b
 
@@ -703,14 +676,41 @@ if errorlevel 1 (
 pause
 goto START
 
+:PRINTCURRENTROWS
+rem Rows for the DNS servers currently set. CONN/DNS/PING come from the last list test (N/A if that DNS was not in it).
+if not defined ONLINE set "ONLINE=0"
+if not defined CURRENTDNSCOUNT set "CURRENTDNSCOUNT=0"
+if !CURRENTDNSCOUNT! EQU 0 echo No DNS servers detected.
+for /l %%D in (1,1,!CURRENTDNSCOUNT!) do (
+    set "SCONN=N/A"
+    set "SDNS=N/A"
+    set "SPING=N/A"
+    for /l %%K in (1,1,!ONLINE!) do if "!REF[%%K]!"=="!CURRENTDNS[%%D]!" (
+        if defined REFCONN[%%K] set "SCONN=!REFCONN[%%K]!"
+        if defined REFDNS[%%K] set "SDNS=!REFDNS[%%K]!"
+        if defined REFAVG[%%K] set "SPING=!REFAVG[%%K]!"
+    )
+    set "PAD=!CURRENTDNS[%%D]!                "
+    set "CIP=!PAD:~0,16!"
+    set "PAD=        !SCONN!"
+    set "CCONN=!PAD:~-8!"
+    set "PAD=        !SDNS!"
+    set "CDNS=!PAD:~-8!"
+    set "PAD=        !SPING!"
+    set "CPING=!PAD:~-8!"
+    set "CPROV=!CURRENTDNSPROVIDER[%%D]!                        "
+    set "CPROV=!CPROV:~0,24!"
+    echo(!CIP! !CCONN! !CDNS! !CPING!  !CPROV! !CURRENTDNSLOCATION[%%D]!
+)
+exit /b
+
 :SHOWDNS
 echo.
 echo DNS servers configured on "!ADAPTER!":
 call :LOOKUPINFO
-echo DNS IP             PROVIDER                 LOCATION
-echo ---------------------------------------------------------------
-if !CURRENTDNSCOUNT! EQU 0 echo No DNS servers detected.
-for /l %%D in (1,1,!CURRENTDNSCOUNT!) do echo !CURRENTDNS[%%D]!  !CURRENTDNSPROVIDER[%%D]!  !CURRENTDNSLOCATION[%%D]!
+echo DNS IP            CONN ms   DNS ms  PING ms  PROVIDER                 LOCATION
+echo ----------------------------------------------------------------------------------------------------
+call :PRINTCURRENTROWS
 echo.
 echo All Windows network adapter DNS entries:
 ipconfig /all | findstr /i /c:"DNS Servers" /c:"DNS Server"
@@ -719,184 +719,18 @@ pause
 goto START
 
 :END
-call :STOPCONNECTIONMONITOR
 del "!PING_INPUT!" >nul 2>&1
 del "!PING_OUTPUT!" >nul 2>&1
 del "!PING_SCRIPT!" >nul 2>&1
 del "!VOTETEMP!" >nul 2>&1
+del "!DNS_LISTENER_ERR!" "!INFO_INPUT!" "!INFO_OUTPUT!" "!DNS_INFO_FILE!" "!DNS_NAV_FILE!" >nul 2>&1
 endlocal
 exit /b
 
-:CM_ENTRY
-setlocal EnableExtensions EnableDelayedExpansion
-shift
-rem Scan interval in seconds; change this value in the editor (use a number greater than 0).
-set "SCAN_INTERVAL_SECONDS=1"
-set "VALORANT_TCP_PORT=443"
-set "TCP_TIMEOUT_MS=300"
-set "DNS_CHECK_TIMEOUT_MS=3000"
-
-rem Active check: Google, using normal DNS resolution only.
-rem set "VALORANT_ENDPOINT=google.com"
-rem set "CHECK_TCP=0"
-
-rem To change the target, comment out the two active lines above and uncomment ONE target below.
-rem Standard VALORANT hostname, DNS-only:
-rem set "VALORANT_ENDPOINT=playvalorant.com"
-rem set "CHECK_TCP=0"
-
-rem AP shared service, DNS + TCP:
-rem set "VALORANT_ENDPOINT=shared.ap.a.pvp.net"
-rem set "CHECK_TCP=1"
-
-rem AP Player Data, DNS + TCP:
-rem set "VALORANT_ENDPOINT=pd.ap.a.pvp.net"
-rem set "CHECK_TCP=1"
-
-rem AP Game Lobby / Matchmaking, DNS + TCP:
-set "VALORANT_ENDPOINT=glz-ap-1.ap.a.pvp.net"
-set "CHECK_TCP=1"
-
-title DNS Endpoint Monitor - %VALORANT_ENDPOINT%
-
-rem Leave TARGET empty to use the DNS server your PC is using right now.
-rem Or put an IP here, for example 8.8.8.8, to always test that DNS server instead.
-set "TARGET="
-
-rem What the PC says out loud when the connection is lost. Change it to anything you like.
-set "MESSAGE=No connection"
-set "FAILURES=0"
-set "WARNING_SPOKEN="
-
-if /i "%~1"=="test" goto :CM_test
-
-call :CM_DISPLAYHEADER
-
-set "DNS="
-set "KNOWN="
-set "LOG1="
-set "LOG2="
-set "LOG3="
-set "LOG4="
-set "LOG5="
-if defined DNS_MONITOR_STATUS_FILE >"%DNS_MONITOR_STATUS_FILE%" echo 0^|%DNS%
-
-:CM_loop
-rem Detect the DNS server in use right now, so network or DNS changes are picked up
-call :CM_getdns
-set "now=%time: =0%"
-
-if not defined DNS (
-    if defined KNOWN set "DNS=%KNOWN%"
-    call :CM_recordfailure
-    set "ENTRY=[%now:~0,8%] NO CONNECTION - no active network or DNS server found"
-    call :CM_log "%ENTRY%"
-    call :CM_beep
-    goto :CM_wait
-)
-
-rem Reset consecutive failures when the active DNS changes
-if defined KNOWN if not "%KNOWN%"=="%DNS%" call :CM_resetfailures
-rem Report a DNS change; the new server is used for this check
-if defined KNOWN if not "%KNOWN%"=="%DNS%" (set "ENTRY=[%now:~0,8%] DNS server changed: %KNOWN% to %DNS%" & call :CM_log "%ENTRY%")
-set "KNOWN=%DNS%"
-
-rem Resolve the selected hostname with the active DNS server, then use TCP when enabled.
-powershell -NoProfile -NonInteractive -Command "$worker={param($name,$server,$tcp,$port,$limit); try {Import-Module DnsClient -ErrorAction Stop; $r=Resolve-DnsName -Name $name -Server $server -DnsOnly -Type A -QuickTimeout -ErrorAction Stop | Where-Object {$_.IPAddress} | Select-Object -First 1} catch {return 1}; if(-not $r){return 1}; if($tcp -ne '1'){return 0}; $c=New-Object System.Net.Sockets.TcpClient; try {$a=$c.BeginConnect([string]$r.IPAddress,[int]$port,$null,$null); if(-not $a.AsyncWaitHandle.WaitOne([int]$limit)){return 2}; $c.EndConnect($a); return 0} catch {return 2} finally {$c.Close()}}; $pool=[runspacefactory]::CreateRunspacePool(2,2); $pool.Open(); $jobs=@(); for($i=0;$i -lt 2;$i++){$p=[powershell]::Create(); $p.RunspacePool=$pool; [void]$p.AddScript($worker.ToString()); [void]$p.AddArgument($env:VALORANT_ENDPOINT); [void]$p.AddArgument($env:DNS); [void]$p.AddArgument($env:CHECK_TCP); [void]$p.AddArgument($env:VALORANT_TCP_PORT); [void]$p.AddArgument($env:TCP_TIMEOUT_MS); $jobs+= [pscustomobject]@{P=$p;H=$p.BeginInvoke();Done=$false}}; $deadline=[DateTime]::UtcNow.AddMilliseconds([int]$env:DNS_CHECK_TIMEOUT_MS); $done=0; $success=$false; while(-not $success -and $done -lt 2 -and [DateTime]::UtcNow -lt $deadline){foreach($j in $jobs){if(-not $j.Done -and $j.H.IsCompleted){$j.Done=$true; $done++; try{$r=@($j.P.EndInvoke($j.H)); if($r.Count -gt 0 -and [int]$r[$r.Count-1] -eq 0){$success=$true}}catch{}; $j.P.Dispose()}}; if(-not $success){Start-Sleep -Milliseconds 25}}; if($success){foreach($j in $jobs){if(-not $j.Done){try{[void]$j.P.BeginStop($null,$null)}catch{}}}; exit 0}; if($done -eq 2){$pool.Close(); $pool.Dispose()}else{foreach($j in $jobs){if(-not $j.Done){try{[void]$j.P.BeginStop($null,$null)}catch{}}}}; exit 1" >nul 2>&1
-if errorlevel 1 goto :CM_endpointfailed
-call :CM_resetfailures
-if "%CHECK_TCP%"=="1" (
-    set "ENTRY=[%now:~0,8%] OK - %DNS% resolved %VALORANT_ENDPOINT% and TCP %VALORANT_TCP_PORT% connected"
-) else (
-    set "ENTRY=[%now:~0,8%] OK - %DNS% resolved %VALORANT_ENDPOINT%"
-)
-call :CM_log "%ENTRY%"
-goto :CM_wait
-
-:CM_endpointfailed
-call :CM_recordfailure
-call :CM_recordfailure
-set "ENTRY=[%now:~0,8%] BOTH CHECK THREADS FAILED/TIMED OUT - %DNS% could not verify %VALORANT_ENDPOINT%"
-call :CM_log "%ENTRY%"
-call :CM_beep
-goto :CM_wait
-
-:CM_recordfailure
-set /a FAILURES+=1
-call :CM_writefailurestate
-exit /b
-
-:CM_resetfailures
-set "FAILURES=0"
-set "WARNING_SPOKEN="
-call :CM_writefailurestate
-exit /b
-
-:CM_writefailurestate
-if not defined DNS_MONITOR_STATUS_FILE exit /b
->"%DNS_MONITOR_STATUS_FILE%" echo !FAILURES!^|!DNS!
-exit /b
-
-:CM_wait
-timeout /t %SCAN_INTERVAL_SECONDS% /nobreak >nul
-goto :CM_loop
-
-
-:CM_log
-rem Keep and display only the five most recent log records.
-set "LOG5=%LOG4%"
-set "LOG4=%LOG3%"
-set "LOG3=%LOG2%"
-set "LOG2=%LOG1%"
-set "LOG1=%~1"
-cls
-call :CM_DISPLAYHEADER
-if defined LOG5 echo %LOG5%
-if defined LOG4 echo %LOG4%
-if defined LOG3 echo %LOG3%
-if defined LOG2 echo %LOG2%
-if defined LOG1 echo %LOG1%
-exit /b
-
-:CM_DISPLAYHEADER
-echo ============================================================
-echo  DNS endpoint monitor - checks every %SCAN_INTERVAL_SECONDS% seconds
-echo  Re-detects the DNS server your PC is using on every check,
-echo  Selected target: %VALORANT_ENDPOINT%
-if "%CHECK_TCP%"=="1" (
-    echo  Check mode: DNS resolution plus TCP handshake on port %VALORANT_TCP_PORT%
-) else (
-    echo  Check mode: normal DNS resolution only
-)
-echo  Press Ctrl+C to stop.   To try the voice: %~nx0 --connection-monitor test
-echo ============================================================
-echo.
-exit /b
-
-:CM_getdns
-rem Uses the DNS server of the adapter that holds the default route, the one in use
-set "DNS=%TARGET%"
-if defined DNS exit /b
-for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1; if ($r) { (Get-DnsClientServerAddress -InterfaceIndex $r.InterfaceIndex -AddressFamily IPv4).ServerAddresses | Select-Object -First 1 }" 2^>nul`) do set "DNS=%%i"
-exit /b
-
-
-:CM_beep
-rem Speak once per consecutive failure streak, asynchronously so it cannot delay failover.
-if defined WARNING_SPOKEN exit /b
-set "WARNING_SPOKEN=1"
-start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($env:MESSAGE)"
-exit /b
-
-
-:CM_test
-echo Speaking: %MESSAGE%
-call :CM_beep
-exit /b
-
 :PSRUNSPACEPING
-# Parallel DNS ping tester for auto_combined_dns_manager_failover.bat
-# Tests every DNS server concurrently with a PowerShell runspace pool.
+# Parallel DNS tester for auto_combined_dns_manager_failover.bat
+# Per server: ping, one raw UDP DNS lookup (DNS ms) and a TCP connect (CONN ms).
+# A bounded runspace pool does the work and only a small window of jobs exists at once.
 $ErrorActionPreference = 'Stop'
 
 function Get-IntSetting {
@@ -921,31 +755,109 @@ $outputPath = [string][Environment]::GetEnvironmentVariable('DNS_PING_OUTPUT')
 $pingCount  = Get-IntSetting 'DNS_PING_COUNT' 4 1 10
 $timeoutMs  = Get-IntSetting 'DNS_PING_TIMEOUT_MS' 1800 200 10000
 $probeMs    = Get-IntSetting 'DNS_PING_PROBE_TIMEOUT_MS' 1200 200 10000
-$maxThreads = Get-IntSetting 'DNS_PING_THREADS' 128 1 512
+$endpoint   = [string][Environment]::GetEnvironmentVariable('DNS_TEST_ENDPOINT')
+if ($endpoint -notmatch '^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$') { $endpoint = 'glz-ap-1.ap.a.pvp.net' }
+$tcpPort    = Get-IntSetting 'DNS_TEST_TCP_PORT' 443 0 65535
+$tcpMs      = Get-IntSetting 'DNS_TEST_TCP_TIMEOUT_MS' 1500 200 10000
+$dnsLimitMs = Get-IntSetting 'DNS_TEST_DNS_TIMEOUT_MS' 1200 200 10000
+$maxThreads = Get-IntSetting 'DNS_PING_THREADS' 64 1 512
 
 if ([string]::IsNullOrWhiteSpace($inputPath)) { exit 2 }
 if ([string]::IsNullOrWhiteSpace($outputPath)) { exit 2 }
 if (-not (Test-Path -LiteralPath $inputPath)) { exit 3 }
 
+# Only real, public-looking IPv4 addresses are tested (no 0.x, 127.x, 169.254.x or 224+).
 $ips = New-Object System.Collections.Generic.List[string]
+$seen = New-Object System.Collections.Generic.HashSet[string]
 foreach ($line in [System.IO.File]::ReadAllLines($inputPath)) {
-    $ip = $line.Trim()
-    if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$') {
-        if (-not $ips.Contains($ip)) { $ips.Add($ip) }
+    $text = $line.Trim()
+    $addr = $null
+    if ($text -match '^\d{1,3}(\.\d{1,3}){3}$' -and [System.Net.IPAddress]::TryParse($text, [ref]$addr)) {
+        $b = $addr.GetAddressBytes()
+        if ($b.Length -eq 4 -and $b[0] -ne 0 -and $b[0] -ne 127 -and $b[0] -lt 224 -and -not ($b[0] -eq 169 -and $b[1] -eq 254)) {
+            if ($seen.Add($addr.ToString())) { $ips.Add($addr.ToString()) }
+        }
     }
 }
 if ($ips.Count -eq 0) { exit 4 }
 if ($maxThreads -gt $ips.Count) { $maxThreads = $ips.Count }
 
-# One runspace job per DNS server. The first packet is a quick probe, then the
-# remaining packets are sent only when the server answers, like the old loop.
+# One job per DNS server. The first ping is a quick probe; the other pings are only sent when
+# the server answers. DNS and CONN are tested whether or not the server answers ping.
 $worker = {
     param(
         [string]$Ip,
         [int]$Count,
         [int]$TimeoutMs,
-        [int]$ProbeMs
+        [int]$ProbeMs,
+        [string]$Endpoint,
+        [int]$TcpPort,
+        [int]$TcpMs,
+        [int]$DnsLimitMs
     )
+
+    function Skip-Name([byte[]]$d, [int]$p) {
+        while ($p -lt $d.Length) {
+            $l = $d[$p]
+            if ($l -eq 0) { return ($p + 1) }
+            if (($l -band 0xC0) -eq 0xC0) { return ($p + 2) }
+            $p += $l + 1
+        }
+        return $p
+    }
+
+    # One A lookup sent straight to $Server on UDP port 53. Returns @{Ms; Addr} or $null.
+    function Query-A([string]$Server, [string]$Name, [int]$LimitMs) {
+        $udp = $null
+        try {
+            $rid = Get-Random -Minimum 1 -Maximum 65535
+            $hi = [byte]($rid -shr 8)
+            $lo = [byte]($rid -band 255)
+            $q = New-Object System.Collections.Generic.List[byte]
+            $q.Add($hi)
+            $q.Add($lo)
+            $q.AddRange([byte[]](1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            foreach ($label in $Name.Split('.')) {
+                $lb = [System.Text.Encoding]::ASCII.GetBytes($label)
+                $q.Add([byte]$lb.Length)
+                $q.AddRange($lb)
+            }
+            $q.AddRange([byte[]](0, 0, 1, 0, 1))
+            $pkt = $q.ToArray()
+            $udp = New-Object System.Net.Sockets.UdpClient
+            $udp.Client.ReceiveTimeout = $LimitMs
+            $udp.Client.SendTimeout = $LimitMs
+            $udp.Connect($Server, 53)
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            [void]$udp.Send($pkt, $pkt.Length)
+            $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+            $r = $udp.Receive([ref]$ep)
+            $sw.Stop()
+            if ($r.Length -lt 12 -or $r[0] -ne $hi -or $r[1] -ne $lo) { return $null }
+            if (($r[2] -band 0x80) -eq 0) { return $null }
+            if (($r[3] -band 0x0F) -ne 0) { return $null }
+            $qd = ($r[4] * 256) + $r[5]
+            $an = ($r[6] * 256) + $r[7]
+            $p = 12
+            for ($i = 0; $i -lt $qd; $i++) { $p = Skip-Name $r $p; $p += 4 }
+            for ($i = 0; $i -lt $an; $i++) {
+                $p = Skip-Name $r $p
+                $type = ($r[$p] * 256) + $r[$p + 1]
+                $rdlen = ($r[$p + 8] * 256) + $r[$p + 9]
+                $p += 10
+                if ($type -eq 1 -and $rdlen -eq 4) {
+                    $text = '{0}.{1}.{2}.{3}' -f $r[$p], $r[$p + 1], $r[$p + 2], $r[$p + 3]
+                    return @{ Ms = $sw.Elapsed.TotalMilliseconds; Addr = $text }
+                }
+                $p += $rdlen
+            }
+            return $null
+        } catch {
+            return $null
+        } finally {
+            if ($null -ne $udp) { $udp.Close() }
+        }
+    }
 
     $sent = 0
     $received = 0
@@ -979,27 +891,52 @@ $worker = {
         }
     }
 
-    if ($received -eq 0) {
-        return [pscustomobject]@{
-            IP       = $Ip
-            Sent     = $sent
-            Received = 0
-            Min      = 'N/A'
-            Max      = 'N/A'
-            Avg      = 'N/A'
-            Loss     = '100%'
-        }
+    # DNS ms: best of 2 lookups (the first one can be a cold, recursive lookup). A failed first
+    # lookup ends the test for this server. CONN ms: TCP connect to the address it returned.
+    $dnsOut = 'N/A'
+    $connOut = 'N/A'
+    $addrOut = $null
+    $best = $null
+    for ($k = 0; $k -lt 2; $k++) {
+        $res = Query-A $Ip $Endpoint $DnsLimitMs
+        if ($null -eq $res) { break }
+        $addrOut = $res.Addr
+        if ($null -eq $best -or $res.Ms -lt $best) { $best = $res.Ms }
+    }
+    if ($null -ne $best) { $dnsOut = [int][math]::Round($best) }
+    if ($null -ne $addrOut -and $TcpPort -gt 0) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $iar = $client.BeginConnect($addrOut, $TcpPort, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TcpMs) -and $client.Connected) {
+                $client.EndConnect($iar)
+                $watch.Stop()
+                $connOut = [int][math]::Round($watch.Elapsed.TotalMilliseconds)
+            }
+        } catch { } finally { $client.Close() }
     }
 
-    $lossPercent = [int][math]::Round((($sent - $received) * 100.0) / $sent)
+    $lossPercent = 100
+    if ($sent -gt 0) { $lossPercent = [int][math]::Round((($sent - $received) * 100.0) / $sent) }
+    $minOut = 'N/A'
+    $maxOut = 'N/A'
+    $avgOut = 'N/A'
+    if ($received -gt 0) {
+        $minOut = [int][math]::Round($min)
+        $maxOut = [int][math]::Round($max)
+        $avgOut = [int][math]::Round($total / $received)
+    }
     return [pscustomobject]@{
         IP       = $Ip
         Sent     = $sent
         Received = $received
-        Min      = [int][math]::Round($min)
-        Max      = [int][math]::Round($max)
-        Avg      = [int][math]::Round($total / $received)
+        Min      = $minOut
+        Max      = $maxOut
+        Avg      = $avgOut
         Loss     = ('{0}%' -f $lossPercent)
+        Dns      = $dnsOut
+        Conn     = $connOut
     }
 }
 
@@ -1010,13 +947,15 @@ $pool.Open()
 
 $writer = [System.IO.StreamWriter]::new($outputPath, $false, [System.Text.Encoding]::ASCII)
 try {
-    # Keep at most one worker's worth of PowerShell pipelines in memory.
-    for ($batchStart = 0; $batchStart -lt $ips.Count; $batchStart += $maxThreads) {
-        $batchEnd = [Math]::Min($batchStart + $maxThreads, $ips.Count) - 1
-        $jobs = New-Object System.Collections.Generic.List[object]
-
-        for ($index = $batchStart; $index -le $batchEnd; $index++) {
-            $ip = $ips[$index]
+    # Sliding window: jobs are queued ahead (twice the thread count) so the pool never waits for
+    # a slow server, but only a few pipelines are alive at the same time. Results are written in input order.
+    $total = $ips.Count
+    $window = $maxThreads * 2
+    $jobs = New-Object 'object[]' $total
+    $submitted = 0
+    for ($done = 0; $done -lt $total; $done++) {
+        while ($submitted -lt $total -and ($submitted - $done) -lt $window) {
+            $ip = $ips[$submitted]
             $shell = [powershell]::Create()
             $shell.RunspacePool = $pool
             [void]$shell.AddScript($workerScript)
@@ -1024,40 +963,50 @@ try {
             [void]$shell.AddArgument($pingCount)
             [void]$shell.AddArgument($timeoutMs)
             [void]$shell.AddArgument($probeMs)
-            $jobs.Add([pscustomobject]@{
+            [void]$shell.AddArgument($endpoint)
+            [void]$shell.AddArgument($tcpPort)
+            [void]$shell.AddArgument($tcpMs)
+            [void]$shell.AddArgument($dnsLimitMs)
+            $jobs[$submitted] = [pscustomobject]@{
                 IP     = $ip
                 Shell  = $shell
                 Handle = $shell.BeginInvoke()
-            })
+            }
+            $submitted++
         }
 
-        # Collect this batch in input order, then release its pipeline objects.
-        foreach ($job in $jobs) {
+        $job = $jobs[$done]
+        $jobs[$done] = $null
+        $result = $null
+        try {
+            $output = @($job.Shell.EndInvoke($job.Handle))
+            if ($output.Count -gt 0) {
+                $result = $output[$output.Count - 1]
+            }
+        } catch {
             $result = $null
-            try {
-                $output = @($job.Shell.EndInvoke($job.Handle))
-                if ($output.Count -gt 0) {
-                    $result = $output[$output.Count - 1]
-                }
-            } catch {
-                $result = $null
-            }
-            if ($null -eq $result) {
-                $result = [pscustomobject]@{
-                    IP       = $job.IP
-                    Sent     = 0
-                    Received = 0
-                    Min      = 'N/A'
-                    Max      = 'N/A'
-                    Avg      = 'N/A'
-                    Loss     = '100%'
-                }
-            }
-            $writer.WriteLine(('{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $result.IP, $result.Received, $result.Min, $result.Max, $result.Avg, $result.Loss, $result.Sent))
-            $job.Shell.Dispose()
         }
-        $writer.Flush()
+        if ($null -eq $result) {
+            $result = [pscustomobject]@{
+                IP       = $job.IP
+                Sent     = 0
+                Received = 0
+                Min      = 'N/A'
+                Max      = 'N/A'
+                Avg      = 'N/A'
+                Loss     = '100%'
+                Dns      = 'N/A'
+                Conn     = 'N/A'
+            }
+        }
+        $writer.WriteLine(('{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}' -f $result.IP, $result.Received, $result.Min, $result.Max, $result.Avg, $result.Loss, $result.Sent, $result.Dns, $result.Conn))
+        $job.Shell.Dispose()
+        if ((($done + 1) % 10) -eq 0 -or ($done + 1) -eq $total) {
+            Write-Host -NoNewline ("`r  Tested {0} of {1}" -f ($done + 1), $total)
+        }
     }
+    $writer.Flush()
+    Write-Host ''
 } finally {
     $writer.Dispose()
     $pool.Close()
