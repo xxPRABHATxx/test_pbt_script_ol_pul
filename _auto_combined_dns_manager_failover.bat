@@ -84,7 +84,8 @@ goto START
 :SETURL
 cls
 echo Enter the full website URL to scrape.
-echo Example: https://publicdns.info/country/in.html
+echo Example: https://dnsmid.com/popular/
+echo Example: https://dnsmid.com/asia/  europe/
 echo.
 set "NEWURL="
 set /p "NEWURL=Website URL: "

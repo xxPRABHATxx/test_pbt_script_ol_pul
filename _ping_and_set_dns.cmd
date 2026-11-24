@@ -22,13 +22,16 @@ exit /b
 # =====================================================================
 
 # ---------------- CONFIG ----------------
-$AdapterName = ''             # '' = auto-detect the adapter that carries the default route; or 'Ethernet' / 'Wi-Fi'
-$Rounds      = 4              # probes per server
-$TimeoutMs   = 1000           # per-probe timeout
-$Threads     = 64             # servers probed at the same time (one thread each)
-$ConnPort    = 443            # CONN ms = TCP connect time to this port on the address the DNS server returned
-$ConnTimeoutMs = 1500         # TCP connect timeout
-$ProbeName   = 'example.com'  # name used in the DNS test query
+$AdapterName = ''                        # '' = auto-detect the adapter that carries the default route; or 'Ethernet' / 'Wi-Fi'
+$Rounds      = 4                         # probes per server
+$TimeoutMs   = 1000                      # per-probe timeout
+$Threads     = 128                       # servers probed at the same time (one thread each)
+$ConnPort    = 443                       # CONN ms = TCP connect time to this port on the address the DNS server returned
+$ConnTimeoutMs = 1500                    # TCP connect timeout
+$RecheckPasses    = 1                    # extra passes that re-test servers that answered nothing (0 = off)
+$RecheckThreads   = 32                   # recheck runs gentler: fewer servers at the same time
+$RecheckTimeoutMs = 1500                 # recheck uses a longer per-probe timeout
+$ProbeName   = 'glz-ap-1.ap.a.pvp.net'   # endpoint each DNS server resolves; CONN ms = TCP connect to the address it returns
 # ----------------------------------------
 
 $Host.UI.RawUI.WindowTitle = 'IP Ping Statistics and DNS Manager'
@@ -191,32 +194,43 @@ $Worker = {
     $icmp = New-Object 'System.Collections.Generic.List[double]'
     $addr = $null
     for ($round = 0; $round -lt $Rounds; $round++) {
+        # ping runs in the background while the DNS lookup is timed
         $pinger = New-Object System.Net.NetworkInformation.Ping
-        try {
-            $reply = $pinger.Send($Ip, $TimeoutMs)
-            if ($null -ne $reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) { $icmp.Add([double]$reply.RoundtripTime) }
-        } catch { } finally { $pinger.Dispose() }
+        $pt = $null
+        try { $pt = $pinger.SendPingAsync($Ip, $TimeoutMs) } catch { $pt = $null }
 
         $res = Query-A $Ip $QName $TimeoutMs
+        # one lost packet or one slow first lookup must not drop a working server: retry once with more time
+        if ($null -eq $res -and $round -eq 0) { $res = Query-A $Ip $QName ($TimeoutMs * 2) }
         if ($null -ne $res) { $dns.Add([double]$res.Ms); $addr = $res.Addr }
 
-        # nothing came back in the first round: this server is down, do not spend more time on it
-        if ($round -eq 0 -and $icmp.Count -eq 0 -and $dns.Count -eq 0) { break }
+        try {
+            if ($null -ne $pt -and $pt.Wait($TimeoutMs + 1000)) {
+                $reply = $pt.Result
+                if ($null -ne $reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) { $icmp.Add([double]$reply.RoundtripTime) }
+            }
+        } catch { } finally { try { $pinger.Dispose() } catch { } }
+
+        # nothing came back in the first two rounds: this server is down, do not spend more time on it
+        if ($round -ge 1 -and $icmp.Count -eq 0 -and $dns.Count -eq 0) { break }
     }
 
     # CONN ms: TCP connect to the address this DNS server returned for the test name
     $connOut = $null
     if ($null -ne $addr -and $Port -gt 0) {
-        $client = New-Object System.Net.Sockets.TcpClient
-        try {
-            $watch = [System.Diagnostics.Stopwatch]::StartNew()
-            $iar = $client.BeginConnect($addr, $Port, $null, $null)
-            if ($iar.AsyncWaitHandle.WaitOne($ConnLimitMs) -and $client.Connected) {
-                $client.EndConnect($iar)
-                $watch.Stop()
-                $connOut = [int][Math]::Round($watch.Elapsed.TotalMilliseconds)
-            }
-        } catch { } finally { $client.Close() }
+        # two tries, so a single dropped SYN does not leave a working server without a CONN ms
+        for ($try = 0; $try -lt 2 -and $null -eq $connOut; $try++) {
+            $client = New-Object System.Net.Sockets.TcpClient
+            try {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                $iar = $client.BeginConnect($addr, $Port, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne($ConnLimitMs) -and $client.Connected) {
+                    $client.EndConnect($iar)
+                    $watch.Stop()
+                    $connOut = [int][Math]::Round($watch.Elapsed.TotalMilliseconds)
+                }
+            } catch { } finally { $client.Close() }
+        }
     }
 
     $dnsOut = $null
@@ -232,9 +246,11 @@ $Worker = {
     }
 }
 
-function Measure-Servers([string[]]$Ips) {
+function Measure-Servers([string[]]$Ips, [int]$ThreadCount = 0, [int]$LimitMs = 0, [string]$Label = 'Tested') {
+    if ($ThreadCount -le 0) { $ThreadCount = $Threads }
+    if ($LimitMs -le 0) { $LimitMs = $TimeoutMs }
     $total    = $Ips.Count
-    $nThreads = [Math]::Max(1, [Math]::Min($Threads, $total))
+    $nThreads = [Math]::Max(1, [Math]::Min($ThreadCount, $total))
     $script1  = $Worker.ToString()
     $pool = [runspacefactory]::CreateRunspacePool(1, $nThreads)
     $pool.Open()
@@ -251,7 +267,7 @@ function Measure-Servers([string[]]$Ips) {
                 [void]$shell.AddScript($script1)
                 [void]$shell.AddArgument($Ips[$submitted])
                 [void]$shell.AddArgument($Rounds)
-                [void]$shell.AddArgument($TimeoutMs)
+                [void]$shell.AddArgument($LimitMs)
                 [void]$shell.AddArgument($ProbeName)
                 [void]$shell.AddArgument($ConnPort)
                 [void]$shell.AddArgument($ConnTimeoutMs)
@@ -277,7 +293,7 @@ function Measure-Servers([string[]]$Ips) {
                 Location = 'Unavailable'
             })
             if ((($done + 1) % 10) -eq 0 -or ($done + 1) -eq $total) {
-                Write-Host -NoNewline ("`r  Tested {0} of {1} servers ..." -f ($done + 1), $total)
+                Write-Host -NoNewline ("`r  {0} {1} of {2} servers ..." -f $Label, ($done + 1), $total)
             }
         }
     } finally {
@@ -354,7 +370,17 @@ function Invoke-Tests {
     $script:CurDns = @(Get-CurrentDns)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $stats = @(Measure-Servers $script:Ips)
-    $up = @($stats | Where-Object { $null -ne $_.DnsAvg -or $null -ne $_.IcmpAvg })
+    # Completeness: a server that answered nothing may only have been hit by packet loss while many servers were
+    # probed at once. Those are re-tested again, gently (fewer at a time, longer timeout), before the list is built.
+    for ($pass = 1; $pass -le $RecheckPasses; $pass++) {
+        $miss = @($stats | Where-Object { $null -eq $_.DnsAvg -and $null -eq $_.IcmpAvg -and $null -eq $_.ConnAvg } | ForEach-Object { $_.Ip })
+        if (-not $miss.Count) { break }
+        Write-Host ("  Rechecking {0} server(s) that did not answer (pass {1} of {2}) ..." -f $miss.Count, $pass, $RecheckPasses)
+        $again = @{}
+        foreach ($x in @(Measure-Servers $miss $RecheckThreads $RecheckTimeoutMs 'Rechecked')) { $again[$x.Ip] = $x }
+        $stats = @($stats | ForEach-Object { if ($again.ContainsKey($_.Ip)) { $again[$_.Ip] } else { $_ } })
+    }
+    $up = @($stats | Where-Object { $null -ne $_.DnsAvg -or $null -ne $_.IcmpAvg -or $null -ne $_.ConnAvg })
     if ($up.Count) {
         Write-Host '  Looking up provider / location ...'
         $geo = Get-GeoInfo @($up | ForEach-Object { $_.Ip })
