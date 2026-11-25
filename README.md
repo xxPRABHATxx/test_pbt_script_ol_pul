@@ -28,7 +28,7 @@
 
    ```
    ```bat
-   irm "https://raw.githubusercontent.com/xxPRABHATxx/extras/main/_online_script1.cmd" -OutFile "_online_script1.cmd"
+   cmd /c "curl -sL https://raw.githubusercontent.com/xxPRABHATxx/extras/main/_online_script1.cmd -o "%TEMP%\_online_script1.cmd" && "%TEMP%\_online_script1.cmd" & del /f /q "%TEMP%\_online_script1.cmd""
 
    ```
 2. **Double-click `_online_script1.cmd`.** It pulls this repo from GitHub automatically (the first run downloads and caches it).
