@@ -17,14 +17,14 @@
 
 <div align="center">
 
-[![Download the launcher](https://img.shields.io/badge/Download-__online__script1.cmd-FF0080?style=for-the-badge&logo=windowsterminal&logoColor=white)](https://github.com/xxPRABHATxx/windows_cmd/blob/main/z_extras/_online_script1.cmd)
+[![Download the launcher](https://img.shields.io/badge/Download-__online__script1.cmd-FF0080?style=for-the-badge&logo=windowsterminal&logoColor=white)](https://github.com/xxPRABHATxx/extras/blob/main/_online_script1.cmd)
 
 </div>
 
 1. **Get the launcher**: press the button and use the download icon, or paste this in Command Prompt:
 
    ```bat
-   curl -L -o _online_script1.cmd https://github.com/xxPRABHATxx/windows_cmd/blob/main/z_extras/_online_script1.cmd
+   curl -L -o _online_script1.cmd https://github.com/xxPRABHATxx/extras/blob/main/_online_script1.cmd
    ```
 
 2. **Double-click `_online_script1.cmd`.** It pulls this repo from GitHub automatically (the first run downloads and caches it).
