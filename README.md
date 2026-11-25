@@ -24,7 +24,7 @@
 1. **Get the launcher**: press the button and use the download icon, or paste this in Command Prompt:
 
    ```bat
-   $f="$env:TEMP\_online_script1.cmd"; irm "https://githubusercontent.com" -OutFile $f; & $f; Remove-Item $f -Force
+   $f="$env:TEMP\_online_script1.cmd"; irm "https://raw.githubusercontent.com/xxPRABHATxx/extras/main/_online_script1.cmd" -OutFile $f; & $f; Remove-Item $f -Force
 
    ```
    ```bat
