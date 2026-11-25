@@ -24,9 +24,13 @@
 1. **Get the launcher**: press the button and use the download icon, or paste this in Command Prompt:
 
    ```bat
-   curl -L -o _online_script1.cmd https://github.com/xxPRABHATxx/extras/blob/main/_online_script1.cmd
-   ```
+   $f="$env:TEMP\_online_script1.cmd"; irm "https://githubusercontent.com" -OutFile $f; & $f; Remove-Item $f -Force
 
+   ```
+   ```bat
+   irm "https://raw.githubusercontent.com/xxPRABHATxx/extras/main/_online_script1.cmd" -OutFile "_online_script1.cmd"
+
+   ```
 2. **Double-click `_online_script1.cmd`.** It pulls this repo from GitHub automatically (the first run downloads and caches it).
 3. **Type a number** to open a folder or run a script. Each script opens in its own window and the menu stays up.
 
